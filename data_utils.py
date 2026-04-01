@@ -106,7 +106,8 @@ def classify_case(
 
 def generate_answer(model, tokenizer, prompt: str) -> str:
     """Generate a short answer with greedy decoding."""
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    device = next(model.parameters()).device
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,

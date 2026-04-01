@@ -108,7 +108,8 @@ def extract_hidden_states_single(
         Layer 0 = first transformer block output (embedding layer excluded).
     """
     full_text = prompt + " " + answer
-    inputs = tokenizer(full_text, return_tensors="pt").to(model.device)
+    device = next(model.parameters()).device
+    inputs = tokenizer(full_text, return_tensors="pt").to(device)
 
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
