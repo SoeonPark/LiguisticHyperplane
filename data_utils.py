@@ -1,24 +1,27 @@
 """
 data_utils.py
 
-Load HotpotQA and filter into Case 1 (non-hallucination) and Case 3 (hallucination)
-by running inference under two conditions:
-  Condition A: Question only          (w/o context)
-  Condition B: Context + Question     (w/  context)
+Load HotpotQA and filter into Case 1 (non-hallucination) and Case 3 (hallucination).
+
+Supports two HotpotQA subset configurations:
+  fullwiki   : gold context from supporting facts only (harder for model)
+  distractor : gold context mixed with 10 distractor paragraphs
+  both       : run fullwiki and distractor, merge results (deduped by question+subset)
 
 Case definitions:
-  Case 1: Correct w/ context, Wrong w/o context  → label 0 (non-hallucination)
-  Case 2: Wrong w/ context, Correct w/o context  → excluded
-  Case 3: Wrong in both, same answer              → label 1 (hallucination)
-  Case 4: Wrong in both, different answers        → excluded
+  Case 1: Correct w/ context, Wrong w/o context  -> label 0 (non-hallucination)
+  Case 2: Wrong w/ context, Correct w/o context  -> excluded
+  Case 3: Wrong in both, same answer              -> label 1 (hallucination)
+  Case 4: Wrong in both, different answers        -> excluded
 """
 
 import json
 import os
 from typing import Dict, List, Optional, Tuple
+import re, string
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -39,7 +42,7 @@ def build_context_string(
     supporting_facts_titles: List[str],
     paragraphs: List[Tuple[str, List[str]]],
 ) -> str:
-    """Build a context string from HotpotQA supporting facts."""
+    """Build a context string from HotpotQA supporting facts titles."""
     para_dict = {title: "".join(sents) for title, sents in paragraphs}
     context_parts = []
     seen = set()
@@ -52,25 +55,46 @@ def build_context_string(
 
 # ── Answer Utilities ──────────────────────────────────────────────────────────
 
-def extract_answer(generated_text: str, prompt: str) -> str:
-    """Strip the prompt prefix and return only the generated answer."""
-    if generated_text.startswith(prompt):
-        answer = generated_text[len(prompt):].strip()
-    else:
-        answer = generated_text.strip()
-    # Keep only the first line (greedy decoding typically gives one answer)
-    return answer.split("\n")[0].strip()
+# def extract_answer(generated_text: str, prompt: str) -> str:
+#     if generated_text.startswith(prompt):
+#         answer = generated_text[len(prompt):].strip()
+#     else:
+#         answer = generated_text.strip()
+#     return answer.split("\n")[0].strip()
 
 
 def normalize_answer(text: str) -> str:
-    return text.lower().strip()
+    text = text.lower()
+    text = re.sub(r'\b(a|an|the)\b', ' ', text)
+    text = ''.join(c for c in text if c not in string.punctuation)
+    return ' '.join(text.split())
+
 
 
 def is_correct(pred: str, gold: str) -> bool:
+    """
+        If Comparison type, Check for exact match. 
+    """
     pred_norm = normalize_answer(pred)
     gold_norm = normalize_answer(gold)
-    return pred_norm == gold_norm or gold_norm in pred_norm
 
+    # For the Comparison Type
+    if gold_norm in ('yes', 'no'):
+        first = pred_norm.split()[0] if pred_norm.split() else ''
+        return first == gold_norm
+
+    # For the Entity Type
+    pred_tokens = set(pred_norm.split())
+    gold_tokens = set(gold_norm.split())
+    if not pred_tokens or not gold_tokens:
+        return False
+    common = pred_tokens & gold_tokens
+    if not common:
+        return False
+    precision = len(common) / len(pred_tokens)
+    recall = len(common) / len(gold_tokens)
+    f1 = 2 * precision * recall / (precision + recall)
+    return f1 >= 0.5
 
 # ── Case Classifier ───────────────────────────────────────────────────────────
 
@@ -80,34 +104,48 @@ def classify_case(
     ans_w_context: str,
     ans_wo_context: str,
 ) -> int:
-    """
-    Returns:
-        1: Correct w/ context, Wrong w/o context → Non-hallucination (label 0)
-        2: Wrong w/ context, Correct w/o context → Excluded
-        3: Wrong in both with same answer         → Hallucination (label 1)
-        4: Wrong in both with different answers   → Excluded
-        0: Both correct                           → Excluded (cannot distinguish)
-    """
     if correct_w_context and correct_wo_context:
-        return 0   # Both correct — model already knew, cannot distinguish
+        return 0
     elif correct_w_context and not correct_wo_context:
-        return 1   # Context helped → non-hallucination
+        return 1   # Non-hallucination
     elif not correct_w_context and correct_wo_context:
-        return 2   # Context hurt  → excluded
+        return 2   # Excluded
     else:
-        # Both wrong
         if normalize_answer(ans_w_context) == normalize_answer(ans_wo_context):
-            return 3   # Consistent wrong answer → hallucination
+            return 3   # Hallucination
         else:
-            return 4   # Inconsistent wrong answers → excluded
+            return 4   # Excluded
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def generate_answer(model, tokenizer, prompt: str) -> str:
-    """Generate a short answer with greedy decoding."""
+    """Firstly generate the answer using the model, then extract the answer part from the generated text."""
+    # Generate
     device = next(model.parameters()).device
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    input_len = inputs.input_ids.shape[1]
+    
+    # breakpoint()
+    """
+    (Pdb) print(tokenizer.all_special_ids)
+    [128000, 128001]
+    (Pdb) prompt
+    'Question: Were Scott Derrickson and Ed Wood of the same nationality?\nAnswer:'
+    (Pdb) len(inputs)
+    2
+    (Pdb) inputs["input_ids"].shape
+    torch.Size([1, 17])
+    (Pdb) len(inputs["input_ids"])
+    1
+    (Pdb) input_len
+    17
+    (Pdb) inputs
+    {'input_ids': tensor([[128000,  14924,     25,  40070,  10016,  73189,    942,    323,   3279,
+            12404,    315,    279,   1890,  59343,   5380,  16533,     25]],
+        device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+    """
+    
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
@@ -115,50 +153,61 @@ def generate_answer(model, tokenizer, prompt: str) -> str:
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
-    generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    return extract_answer(generated_text, prompt)
+    # Extract answer part
+    new_ids = output_ids[0, input_len:] # Tokens that newly generated
+    answer = tokenizer.decode(new_ids, skip_special_tokens=True)
+    # answer_raw = tokenizer.decode(new_ids, skip_special_tokens=False)
+    # breakpoint()
+    """
+    (Pdb) answer
+    ' No. Scott Derrickson is an American film director, screenwriter, and producer. Ed Wood was'
+    """
+    return answer.split("\n")[0].strip()
+
+# ── Dataset Loader ────────────────────────────────────────────────────────────
+
+def load_hotpotqa(subset: str, split: str, max_samples: Optional[int]) -> list:
+    """
+    Load a single HotpotQA subset/split and optionally subsample.
+
+    subset: 'fullwiki' | 'distractor'
+    split:  'train' | 'validation'
+    """
+    print(f"  Loading HotpotQA [{subset} / {split}]...")
+    dataset = load_dataset("hotpotqa/hotpot_qa", subset, split=split)
+    if max_samples is not None:
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+    print(f"  -> {len(dataset)} samples")
+    
+    return dataset, subset
 
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 
-def run_case_filtering(
+def _filter_single_dataset(
+    dataset,
+    subset_name: str,
     model,
     tokenizer,
-    max_samples: Optional[int] = None,
+    answer_types: List[str],
 ) -> List[Dict]:
-    """
-    Run inference on HotpotQA and collect Case 1 and Case 3 samples.
-
-    Returns:
-        List of dicts containing question, answer, context, predictions,
-        case number, and binary label (0 = non-hallucination, 1 = hallucination).
-    """
-    print("Loading HotpotQA (fullwiki)...")
-    dataset = load_dataset("hotpotqa/hotpot_qa", "fullwiki", split=config.DATA_SPLIT)
-
-    if max_samples is not None:
-        dataset = dataset.select(range(min(max_samples, len(dataset))))
-
+    """Run case filtering on a single HotpotQA dataset object."""
     results = []
     model.eval()
 
-    for item in tqdm(dataset, desc="Filtering cases"):
+    for item in tqdm(dataset, desc=f"Filtering [{subset_name}]"):
         question      = item["question"]
         gold_answer   = item["answer"]
-        question_type = item["type"]   # "bridge" or "comparison"
+        question_type = item["type"]
 
-        # ── Answer type filtering ──────────────────────────────────────────
-        # For comparison questions the answer is typically "yes" / "no".
-        # For bridge questions the answer is usually a named entity.
         if gold_answer.lower() in ["yes", "no"]:
             answer_type = gold_answer.lower()
         else:
             answer_type = "entity"
 
-        if answer_type not in config.ANSWER_TYPES:
+        if answer_type not in answer_types:
             continue
 
-        # ── Context construction ───────────────────────────────────────────
         supporting_facts_titles = [sf[0] for sf in item["supporting_facts"]]
         paragraphs = list(
             zip(item["context"]["title"], item["context"]["sentences"])
@@ -168,7 +217,6 @@ def run_case_filtering(
         prompt_wo_context = build_prompt_no_context(question)
         prompt_w_context  = build_prompt_with_context(question, context)
 
-        # ── Inference ──────────────────────────────────────────────────────
         ans_wo_context = generate_answer(model, tokenizer, prompt_wo_context)
         ans_w_context  = generate_answer(model, tokenizer, prompt_w_context)
 
@@ -182,36 +230,81 @@ def run_case_filtering(
             ans_wo_context,
         )
 
-        # We only use Case 1 (non-hallucination) and Case 3 (hallucination)
-        if case not in [1, 3]:
-            continue
-
-        label = 0 if case == 1 else 1
+        # label = 0 if case == 1 else 1
+        label = 0 if case == 1 else (1 if case == 3 else None)
 
         results.append({
-            "question":          question,
-            "gold_answer":       gold_answer,
-            "answer_type":       answer_type,
-            "question_type":     question_type,
-            "context":           context,
-            "ans_wo_context":    ans_wo_context,
-            "ans_w_context":     ans_w_context,
-            "case":              case,
-            "label":             label,
+            "question": question,
+            "gold_answer": gold_answer,
+            "answer_type": answer_type,
+            "question_type": question_type,
+            "subset": subset_name,
+            "context": context,
+            "ans_wo_context": ans_wo_context,
+            "ans_w_context": ans_w_context,
+            "case": case,
+            "label": label,
             "prompt_wo_context": prompt_wo_context,
-            "prompt_w_context":  prompt_w_context,
+            "prompt_w_context": prompt_w_context,
         })
 
-    # ── Statistics ─────────────────────────────────────────────────────────
-    n_case1 = sum(1 for r in results if r["case"] == 1)
-    n_case3 = sum(1 for r in results if r["case"] == 3)
-    print(f"\nCase filtering complete:")
-    print(f"  Total processed : {len(dataset)}")
-    print(f"  Case 1 (label 0, non-hallucination) : {n_case1}")
-    print(f"  Case 3 (label 1, hallucination)     : {n_case3}")
-    print(f"  Total kept      : {len(results)}")
-
     return results
+
+
+def run_case_filtering(
+    model,
+    tokenizer,
+    max_samples: Optional[int] = None,
+    answer_types: Optional[List[str]] = None,
+    subset: str = "both",          # "fullwiki" | "distractor" | "both"
+    data_split: str = "validation",
+) -> List[Dict]:
+    """
+    Run inference on HotpotQA and collect Case 1 / Case 3 samples.
+
+    subset="both"  -> runs fullwiki and distractor, merges all results.
+    max_samples    -> per-subset cap (so "both" can yield up to 2×max_samples raw).
+    data_split     -> "train" | "validation"
+    """
+    allowed_types = answer_types if answer_types is not None else config.ANSWER_TYPES
+
+    subsets_to_run = (
+        ["fullwiki", "distractor"] if subset == "both" else [subset]
+    )
+
+    all_results: List[Dict] = []
+
+    for ss in subsets_to_run:
+        print(f"\n{'─'*50}")
+        print(f"  Subset : {ss}  |  Split : {data_split}")
+        print(f"{'─'*50}")
+        dataset, _ = load_hotpotqa(ss, data_split, max_samples)
+        results = _filter_single_dataset(dataset, ss, model, tokenizer, allowed_types)
+        print(f"[DBG] Example result: {results[0] if results else 'No results'}")
+        # breakpoint()
+        all_results.extend(results)
+
+        n1 = sum(1 for r in results if r["case"] == 1)
+        n3 = sum(1 for r in results if r["case"] == 3)
+        print(f"\n  [{ss}] processed={len(dataset)}  "
+              f"case1(non-hall)={n1}  case3(hall)={n3}  kept={len(results)}")
+        
+    total = len(all_results)
+    for c in range(5):
+        n = sum(1 for r in all_results if r["case"] == c)
+        print(f"  Case {c}: {n:>5}  ({n/total*100:.1f}%)") 
+
+    # ── Grand total stats ──────────────────────────────────────────────────
+    n1_total = sum(1 for r in all_results if r["case"] == 1)
+    n3_total = sum(1 for r in all_results if r["case"] == 3)
+    print(f"\n{'='*50}")
+    print(f"Case filtering complete (subset={subset}, split={data_split})")
+    print(f"  Total kept      : {len(all_results)}")
+    print(f"  Case 1 (label 0, non-hallucination) : {n1_total}")
+    print(f"  Case 3 (label 1, hallucination)     : {n3_total}")
+    print(f"{'='*50}")
+
+    return all_results
 
 
 # ── Save / Load ───────────────────────────────────────────────────────────────
@@ -220,7 +313,7 @@ def save_cases(cases: List[Dict], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cases, f, ensure_ascii=False, indent=2)
-    print(f"Saved {len(cases)} cases → {path}")
+    print(f"Saved {len(cases)} cases -> {path}")
 
 
 def load_cases(path: str) -> List[Dict]:
@@ -231,16 +324,13 @@ def load_cases(path: str) -> List[Dict]:
 # ── Model Loader ──────────────────────────────────────────────────────────────
 
 def load_model_and_tokenizer(model_name: Optional[str] = None):
-    """Load a base (non-instruct) causal LM and its tokenizer."""
     name = model_name or config.MODEL_NAME
     print(f"Loading model: {name}")
 
-    tokenizer = AutoTokenizer.from_pretrained(name)
+    tokenizer = AutoTokenizer.from_pretrained(name, use_fast=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # device_map="auto" handles multi-GPU / CPU offload automatically.
-    # Do NOT call .to() afterwards — it conflicts with device_map.
     model = AutoModelForCausalLM.from_pretrained(
         name,
         torch_dtype=torch.float16,

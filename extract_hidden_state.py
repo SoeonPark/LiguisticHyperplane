@@ -28,26 +28,33 @@ import config
 # ── Token Position Utilities ──────────────────────────────────────────────────
 
 def find_answer_token_span(
-    tokenizer,
-    prompt: str,
-    answer: str,
+    # tokenizer, prompt: str, answer: str,
+    tokenizer, full_input_ids: torch.Tensor, answer: str,
 ) -> Tuple[int, int]:
     """
     Return (start_idx, end_idx) of the answer tokens in the full sequence.
     end_idx is exclusive (Python-slice style).
     """
-    full_text  = prompt + " " + answer
-    prompt_ids = tokenizer(prompt,    add_special_tokens=False).input_ids
-    full_ids   = tokenizer(full_text, add_special_tokens=False).input_ids
+    # full_text = prompt + " " + answer
+    # prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    # full_ids = tokenizer(full_text, add_special_tokens=False).input_ids
 
-    start_idx = len(prompt_ids)
-    end_idx   = len(full_ids)           # exclusive
+    # start_idx = len(prompt_ids)
+    # end_idx = len(full_ids)           # exclusive
 
-    # Safety clamp
-    start_idx = min(start_idx, end_idx)
-    if start_idx == end_idx:            # degenerate: answer tokenized to nothing
-        start_idx = max(0, end_idx - 1)
+    # # Safety clamp
+    # start_idx = min(start_idx, end_idx)
+    # if start_idx == end_idx:            # degenerate: answer tokenized to nothing
+    #     start_idx = max(0, end_idx - 1)
+    # # breakpoint()  # Debugging: inspect tokenization issues if this happens
 
+    # return start_idx, end_idx
+    answer_ids = tokenizer(
+        answer, add_special_tokens=False
+    ).input_ids
+    end_idx = full_input_ids.shape[1]
+    start_idx = end_idx - len(answer_ids)
+    start_idx = max(0, start_idx)
     return start_idx, end_idx
 
 
@@ -65,9 +72,10 @@ def pool_hidden_states(
         start_idx    : first answer token index (inclusive)
         end_idx      : last answer token index (exclusive)
         strategy     : "first" | "mean" | "last" | "all"
+        # But option 'all' means that execute all three strategies and concatenate the results parallelly -> Each three strategy results will be stored
 
     Returns:
-        1-D numpy array of shape (hidden_dim,) or (span * hidden_dim,) for "all"
+        1-D numpy array of shape (hidden_dim,)
     """
     span = layer_hidden[start_idx:end_idx]   # (span_len, hidden_dim)
 
@@ -81,11 +89,9 @@ def pool_hidden_states(
         vec = span.mean(dim=0)
     elif strategy == "last":
         vec = span[-1]
-    elif strategy == "all":
-        vec = span.flatten()
     else:
         raise ValueError(f"Unknown pooling strategy: '{strategy}'. "
-                         f"Choose from ['first', 'mean', 'last', 'all'].")
+                         f"Choose from ['first', 'mean', 'last'].")
 
     return vec.float().cpu().numpy()
 
@@ -93,11 +99,7 @@ def pool_hidden_states(
 # ── Single-sample Extraction ──────────────────────────────────────────────────
 
 def extract_hidden_states_single(
-    model,
-    tokenizer,
-    prompt: str,
-    answer: str,
-    strategy: str = "first",
+    model, tokenizer, prompt: str, answer: str, strategy: str = "first",
 ) -> np.ndarray:
     """
     Run a forward pass and return hidden states at the answer token position
@@ -107,19 +109,41 @@ def extract_hidden_states_single(
         np.ndarray of shape (num_layers, hidden_dim)
         Layer 0 = first transformer block output (embedding layer excluded).
     """
+    # full_text = prompt + " " + answer
+    # inputs = tokenizer(full_text, return_tensors="pt").to(model.device)
+    # breakpoint()
+    
+    # with torch.no_grad():
+    #     outputs = model(**inputs, output_hidden_states=True)
+
+    # # outputs.hidden_states: tuple of length (num_layers + 1)
+    # #   index 0 → embedding layer output  (excluded from our analysis)
+    # #   index 1 … L → transformer block outputs
+    # all_hidden_states = outputs.hidden_states[1:]   # skip embedding layer
+
+    # breakpoint()
+    
+    # start_idx, end_idx = find_answer_token_span(tokenizer, prompt, answer)
+
+    # breakpoint()
+
+    # layer_vectors = []
+    # for layer_hs in all_hidden_states:
+    #     hs_2d = layer_hs[0]   # (seq_len, hidden_dim) — batch dim removed
+    #     vec   = pool_hidden_states(hs_2d, start_idx, end_idx, strategy)
+    #     layer_vectors.append(vec)
+
+    # return np.stack(layer_vectors)   # (num_layers, hidden_dim)
     full_text = prompt + " " + answer
     device = next(model.parameters()).device
     inputs = tokenizer(full_text, return_tensors="pt").to(device)
-
+    
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
-
-    # outputs.hidden_states: tuple of length (num_layers + 1)
-    #   index 0 → embedding layer output  (excluded from our analysis)
-    #   index 1 … L → transformer block outputs
+        
     all_hidden_states = outputs.hidden_states[1:]   # skip embedding layer
-
-    start_idx, end_idx = find_answer_token_span(tokenizer, prompt, answer)
+    
+    start_idx, end_idx = find_answer_token_span(tokenizer, inputs.input_ids, answer)
 
     layer_vectors = []
     for layer_hs in all_hidden_states:
@@ -128,7 +152,6 @@ def extract_hidden_states_single(
         layer_vectors.append(vec)
 
     return np.stack(layer_vectors)   # (num_layers, hidden_dim)
-
 
 # ── Batch Extraction ──────────────────────────────────────────────────────────
 
@@ -153,7 +176,7 @@ def extract_all_hidden_states(
         hidden_states : np.ndarray  (N, num_layers, hidden_dim)
         labels        : np.ndarray  (N,)  0 = non-hallucination, 1 = hallucination
     """
-    all_hs     = []
+    all_hs = []
     all_labels = []
 
     model.eval()
@@ -161,13 +184,15 @@ def extract_all_hidden_states(
     for item in tqdm(cases, desc=f"Extracting hidden states [strategy={strategy}]"):
         label = item["label"]
 
-        # Select the prompt/answer pair that reflects the label's condition
-        if label == 0:
-            prompt = item["prompt_w_context"]
-            answer = item["ans_w_context"]
-        else:
-            prompt = item["prompt_wo_context"]
-            answer = item["ans_wo_context"]
+        # # Select the prompt/answer pair that reflects the label's condition
+        # if label == 0:
+        #     prompt = item["prompt_w_context"]
+        #     answer = item["ans_w_context"]
+        # else:
+        #     prompt = item["prompt_wo_context"]
+        #     answer = item["ans_wo_context"]
+        prompt = item["prompt_w_context"]
+        answer = item["ans_w_context"]
 
         if not answer.strip():
             continue   # Skip degenerate empty answers
@@ -196,12 +221,14 @@ def save_hidden_states(
     hidden_states: np.ndarray,
     labels: np.ndarray,
     strategy: str,
+    out_dir: Optional[str] = None,
 ) -> None:
-    """Save hidden states and labels as both .npy (fast) files."""
-    os.makedirs(config.HIDDEN_STATE_DIR, exist_ok=True)
+    """Save hidden states and labels as .npy files."""
+    save_dir = out_dir if out_dir is not None else config.HIDDEN_STATE_DIR
+    os.makedirs(save_dir, exist_ok=True)
 
-    hs_path  = os.path.join(config.HIDDEN_STATE_DIR, f"hs_{strategy}.npy")
-    lbl_path = os.path.join(config.HIDDEN_STATE_DIR, f"labels_{strategy}.npy")
+    hs_path  = os.path.join(save_dir, f"hs_{strategy}.npy")
+    lbl_path = os.path.join(save_dir, f"labels_{strategy}.npy")
 
     np.save(hs_path,  hidden_states)
     np.save(lbl_path, labels)
@@ -210,10 +237,11 @@ def save_hidden_states(
     print(f"Saved labels        → {lbl_path}  shape={labels.shape}")
 
 
-def load_hidden_states(strategy: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_hidden_states(strategy: str, hs_dir: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Load previously saved hidden states and labels."""
-    hs_path  = os.path.join(config.HIDDEN_STATE_DIR, f"hs_{strategy}.npy")
-    lbl_path = os.path.join(config.HIDDEN_STATE_DIR, f"labels_{strategy}.npy")
+    load_dir = hs_dir if hs_dir is not None else config.HIDDEN_STATE_DIR
+    hs_path  = os.path.join(load_dir, f"hs_{strategy}.npy")
+    lbl_path = os.path.join(load_dir, f"labels_{strategy}.npy")
 
     hidden_states = np.load(hs_path)
     labels        = np.load(lbl_path)
