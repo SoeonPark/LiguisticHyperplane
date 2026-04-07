@@ -30,6 +30,7 @@ BALANCED: bool = False
 def train_probe_per_layer(
     hidden_states: np.ndarray,   # (N, num_layers, hidden_dim)
     labels: np.ndarray,          # (N,)
+    cases: Optional[List[Dict]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Train one Logistic Regression probe per layer and record metrics.
@@ -54,11 +55,17 @@ def train_probe_per_layer(
 
     # Fixed train/test split — same across all layers
     idx = np.arange(N)
+    # strata = [f"{cases[i]['answer_type']}_{labels[i]}" for i in range(N)]
+    if cases is not None:
+        strata = [f"{cases[i]['answer_type']}_{labels[i]}" for i in range(N)]
+    else:
+        strata = labels
+        
     train_idx, test_idx = train_test_split(
         idx,
         test_size=config.PROBE_TEST_SIZE,
         random_state=config.RANDOM_SEED,
-        stratify=labels,
+        stratify=strata,
     )
     # breakpoint()
 

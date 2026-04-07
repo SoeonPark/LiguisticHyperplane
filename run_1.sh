@@ -8,7 +8,7 @@
 #   bash run_0.sh probe         # probe only (skip data/extract if cached)
 #   bash run_0.sh data          # data filtering only
 
-# nohup bash run_1.sh > Mistral_7B_last.log 2>&1 &
+# nohup bash run_1.sh > Mistral_7B.log 2>&1 &
 # nohup bash run_1.sh probe > llama2_13b_probe.log 2>&1 &
 # nohup bash run_1.sh visualize > llama2_13b_visualize.log 2>&1 &
 
@@ -28,7 +28,7 @@ TAG=""                  # 추가 suffix 없음
 
 # ── Display ────────────────────────────────────────────────────────────────────
 echo "========================================"
-echo "  LLaMA-3.1-8B  |  Linguistic Hyperplane"
+echo "  $MODEL  |  Linguistic Hyperplane"
 echo "  Model        : $MODEL"
 echo "  Subset       : $SUBSET"
 echo "  Split        : $DATA_SPLIT  (max_samples=${MAX_SAMPLES:-all})"
@@ -67,5 +67,5 @@ python main.py $ARGS
 
 echo ""
 echo "========================================"
-echo "  Done: LLaMA / $PHASE / $STRATEGY"
+echo "  Done: $MODEL / $PHASE / $STRATEGY"
 echo "========================================"

@@ -17,6 +17,7 @@ import data_utils as du
 import extract_hidden_state as ehs
 import layer_analysis as la
 import linear_probe as lp
+import analysis_extended as ae
 
 ALL_STRATEGIES = ["first", "mean", "last"]
 
@@ -71,10 +72,9 @@ def phase_data(paths: dict, args) -> None:
         subset=args.subset,
         data_split=args.data_split,
     )
-    du.save_cases(cases_all, config.CASE_DATA_PATH.replace("cases.json", "cases_all.json"))
-
+    du.save_cases(cases_all, paths["cases_all"])
     filtered = [c for c in cases_all if c["case"] in [1, 3]]
-    du.save_cases(filtered, config.CASE_DATA_PATH)
+    du.save_cases(filtered, paths["cases"])
 
     total = len(cases_all)
     print(f"\nCase distribution (total={total}):")
@@ -117,7 +117,8 @@ def phase_probe(paths: dict, strategy: str) -> None:
         return
 
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
-    results = lp.train_probe_per_layer(hidden_states, labels)
+    cases = du.load_cases(paths["cases"])
+    results = lp.train_probe_per_layer(hidden_states, labels, cases=cases)
     lp.save_probe_results(results, strategy, probe_dir=paths["probe_dir"])
     lp.print_summary(results)
 
@@ -138,9 +139,8 @@ def phase_visualize(paths: dict, strategy: str) -> None:
 # ── Phase 4 ───────────────────────────────────────────────────────────────────
 def phase_token_pos(paths: dict, args) -> None:
     """
-    항상 ALL_STRATEGIES(first/mean/last) 세 개를 비교.
-    --strategy 와 무관 — 이 phase의 목적 자체가 세 시점 비교이므로.
-    캐시된 결과는 그대로 재사용.
+    Always runs all strategies (first, mean, last) for token position comparison,
+    since this analysis is specifically about how the choice of token position affects the results.
     """
     print("\n" + "=" * 60)
     print(f"Phase 4: Token position comparison  [{paths['exp_name']}]")
@@ -148,8 +148,8 @@ def phase_token_pos(paths: dict, args) -> None:
 
     results_dict = {}
     for strategy in ALL_STRATEGIES:
-        # extract/probe는 phase_extract/probe 재사용 (skip 로직 포함)
         phase_extract(paths, args, strategy)
+        cases = du.load_cases(paths["cases"])
         phase_probe(paths, strategy)
         results_dict[strategy] = lp.load_probe_results(strategy, probe_dir=paths["probe_dir"])
         lp.print_summary(results_dict[strategy])
@@ -157,16 +157,103 @@ def phase_token_pos(paths: dict, args) -> None:
     la.plot_token_position_comparison(results_dict, figure_dir=paths["figure_dir"])
 
 
+# ── Phase 5: Probe Direction ──────────────────────────────────────────────────
+def phase_probe_direction(paths: dict, args, strategy: str) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase 5: Probe direction analysis  [{paths['exp_name']}]  strategy={strategy}")
+    print("=" * 60)
+ 
+    hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
+    model, tokenizer = du.load_model_and_tokenizer(args.model)
+ 
+    ae.analyze_probe_direction(
+        hidden_states=hidden_states,
+        labels=labels,
+        model=model,
+        tokenizer=tokenizer,
+        probe_dir=paths["probe_dir"],
+        strategy=strategy,
+        figure_dir=paths["figure_dir"],
+    )
+ 
+ 
+# ── Phase 6: PCA Analysis ─────────────────────────────────────────────────────
+def phase_pca(paths: dict, args, strategy: str) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase 6: PCA analysis  [{paths['exp_name']}]  strategy={strategy}")
+    print("=" * 60)
+ 
+    hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
+ 
+    ae.analyze_pca(
+        hidden_states=hidden_states,
+        labels=labels,
+        strategy=strategy,
+        figure_dir=paths["figure_dir"],
+    )
+ 
+ 
+# ── Phase 7: CKA ─────────────────────────────────────────────────────────────
+def phase_cka(paths: dict, args, strategy: str) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase 7: CKA analysis  [{paths['exp_name']}]  strategy={strategy}")
+    print("=" * 60)
+ 
+    hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
+ 
+    ae.analyze_cka(
+        hidden_states=hidden_states,
+        labels=labels,
+        strategy=strategy,
+        figure_dir=paths["figure_dir"],
+    )
+ 
+ 
+# ── Phase 8: Attention to Context ─────────────────────────────────────────────
+def phase_attention(paths: dict, args) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase 8: Attention to context  [{paths['exp_name']}]")
+    print("=" * 60)
+ 
+    cases = du.load_cases(paths["cases"])
+    model, tokenizer = du.load_model_and_tokenizer(args.model)
+ 
+    ae.analyze_attention_to_context(
+        model=model,
+        tokenizer=tokenizer,
+        cases=cases,
+        figure_dir=paths["figure_dir"],
+        max_samples=args.attn_max_samples,
+    )
+ 
+ 
+# ── Phase analyze_all: 5~8 ALL ──────────────────────────────────────────────
+def phase_analyze_all(paths: dict, args, strategies: list) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase analyze_all: Running phases 5-8  [{paths['exp_name']}]")
+    print("=" * 60)
+ 
+    for strategy in strategies:
+        phase_probe_direction(paths, args, strategy)
+        phase_pca(paths, args, strategy)
+        phase_cka(paths, args, strategy)
+ 
+    phase_attention(paths, args)
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Linguistic Hyperplane Verification Pipeline"
     )
-    parser.add_argument("--model",    type=str, default=config.MODEL_NAME)
-    parser.add_argument("--tag",      type=str, default="",
+    parser.add_argument("--model", type=str, default=config.MODEL_NAME)
+    parser.add_argument("--tag", type=str, default="",
                         help="Optional suffix for output folder")
-    parser.add_argument("--phase",    type=str, default="all",
-                        choices=["all", "data", "extract", "probe", "visualize", "token_pos"])
+    parser.add_argument("--phase", type=str, default="all",
+                        choices=[
+                            "all", "data", "extract", "probe", "visualize", "token_pos",
+                            "probe_direction", "pca", "cka", "attention", "analyze_all"
+                        ]
+                    )
     parser.add_argument("--strategy", type=str, default="first",
                         choices=["first", "mean", "last", "all"],
                         help="Pooling strategy. 'all' → first+mean+last. token_pos phase는 항상 3개 고정.")
@@ -180,6 +267,7 @@ def main() -> None:
     parser.add_argument("--balanced", action="store_true",
                         help="class_weight='balanced' in LogisticRegression")
     parser.add_argument("--gpu", "-g", type=str, default="0")
+    parser.add_argument("--attn_max_samples", type=int, default=200, help="Max samples for attention analysis (Phase 8). Default 200.")
 
     args = parser.parse_args()
     lp.BALANCED = args.balanced
@@ -226,6 +314,24 @@ def main() -> None:
 
     elif args.phase == "token_pos":
         phase_token_pos(paths, args)
+        
+    elif args.phase == "probe_direction":
+        for s in strategies:
+            phase_probe_direction(paths, args, s)
+    
+    elif args.phase == "pca":
+        for s in strategies:
+            phase_pca(paths, args, s)
+    
+    elif args.phase == "cka":
+        for s in strategies:
+            phase_cka(paths, args, s)
+    
+    elif args.phase == "attention":
+        phase_attention(paths, args)
+    
+    elif args.phase == "analyze_all":
+        phase_analyze_all(paths, args, strategies)
 
 
 if __name__ == "__main__":

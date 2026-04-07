@@ -89,12 +89,14 @@ def is_correct(pred: str, gold: str) -> bool:
     if not pred_tokens or not gold_tokens:
         return False
     common = pred_tokens & gold_tokens
-    if not common:
-        return False
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gold_tokens)
-    f1 = 2 * precision * recall / (precision + recall)
-    return f1 >= 0.5
+    # Based on Recall
+    return gold_tokens.issubset(pred_tokens)
+    # if not common:
+    #     return False
+    # precision = len(common) / len(pred_tokens)
+    # recall = len(common) / len(gold_tokens)
+    # f1 = 2 * precision * recall / (precision + recall)
+    # return f1 >= 0.5
 
 # ── Case Classifier ───────────────────────────────────────────────────────────
 
