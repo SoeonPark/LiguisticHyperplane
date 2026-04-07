@@ -210,11 +210,22 @@ def _filter_single_dataset(
         if answer_type not in answer_types:
             continue
 
-        supporting_facts_titles = [sf[0] for sf in item["supporting_facts"]]
+        supporting_facts_titles = item["supporting_facts"]["title"]
         paragraphs = list(
             zip(item["context"]["title"], item["context"]["sentences"])
         )
         context = build_context_string(supporting_facts_titles, paragraphs)
+        # breakpoint()
+        if not context.strip():
+            print(f"\n[WARN] Empty context built for question: {question[:60]}...")
+            print(f"  - Supporting facts requested: {supporting_facts_titles}")
+            
+            available_titles = item["context"]["title"]
+            print(f"  - Available titles in item['context']: {available_titles[:5]}... (Total: {len(available_titles)})")
+            
+            missing = [t for t in supporting_facts_titles if t not in available_titles]
+            if missing:
+                print(f"  - Missing titles (not found in context): {missing}")
 
         prompt_wo_context = build_prompt_no_context(question)
         prompt_w_context  = build_prompt_with_context(question, context)

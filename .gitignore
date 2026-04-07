@@ -6,3 +6,4 @@
 *.json
 *.npy
 ./*.npy
+./MechanicalInterpretability

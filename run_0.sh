@@ -25,7 +25,7 @@ SUBSET="both"           # fullwiki + distractor, merged
 DATA_SPLIT="validation"
 MAX_SAMPLES=""          # 비워두면 split 전체 사용
 BALANCED=""             # "--balanced" 로 바꾸면 class_weight='balanced' 활성화
-TAG=""                  # 추가 suffix 없음
+TAG="sample"                  # 추가 suffix 없음
 
 # ── Display ────────────────────────────────────────────────────────────────────
 echo "========================================"
