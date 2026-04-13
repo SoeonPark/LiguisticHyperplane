@@ -75,6 +75,7 @@ def analyze_probe_direction(
     """
     os.makedirs(figure_dir, exist_ok=True)
     
+    breakpoint()
     import json
     result_path = os.path.join(probe_dir, f"probe_{strategy}.json")
     
@@ -86,14 +87,16 @@ def analyze_probe_direction(
     X = hidden_states[:, best_layer, :]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    
+    breakpoint()
     clf = LogisticRegression(
         C=1.0,
         max_iter=config.PROBE_MAX_ITER,
         random_state=config.RANDOM_SEED,
         solver="lbfgs",
     )
+    breakpoint()
     clf.fit(X_scaled, labels)
+    breakpoint()
     
     # Extract probe coefficient vector
     direction = clf.coef_[0]  # (hidden_dim,)
@@ -106,6 +109,7 @@ def analyze_probe_direction(
         print("[ERROR] Model does not have lm_head.weight. Skipping probe direction analysis.")
         return
     
+    breakpoint()
     scores = lm_head_weight @ direction  # (vocab_size,)
     
     # Top-k tokens with highest positive scores
@@ -114,7 +118,7 @@ def analyze_probe_direction(
     
     hallu_tokens = [(tokenizer.decode([idx]).strip(), float(scores[idx])) for idx in hallu_ids]
     non_hallu_tokens = [(tokenizer.decode([idx]).strip(), float(scores[idx])) for idx in non_hallu_ids]
-
+    breakpoint()
     print(f"     Top-{top_k} tokens aligned with hallucination direction (+):")
     for token, score in hallu_tokens:
         print(f"       {token:15s} | score: {score:.4f}")
@@ -396,8 +400,9 @@ def analyze_attention_to_context(
             print("[Phase 8] Attention backend set to eager for attention extraction.")
         except Exception as e:
             print(f"[WARN] Failed to switch attention backend to eager: {e}")
-
+    breakpoint()
     model.eval()
+    breakpoint()
     device = next(model.parameters()).device
     num_layers = model.config.num_hidden_layers
 

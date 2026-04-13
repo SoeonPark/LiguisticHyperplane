@@ -48,6 +48,7 @@ def train_probe_per_layer(
             "train_acc": float,   # train accuracy (overfitting check)
         }
     """
+    breakpoint()
     N, num_layers, hidden_dim = hidden_states.shape
     print(f"\nProbe training: {N} samples | {num_layers} layers | hidden_dim={hidden_dim}")
     print(f"Label distribution: "
@@ -61,20 +62,21 @@ def train_probe_per_layer(
         strata = [f"{cases[i]['answer_type']}_{labels[i]}" for i in range(N)]
     else:
         strata = labels
-        
+    
+    breakpoint()
     train_idx, test_idx = train_test_split(
         idx,
         test_size=config.PROBE_TEST_SIZE,
         random_state=config.RANDOM_SEED,
         stratify=strata,
     )
-    # breakpoint()
+    breakpoint()
 
     results = []
 
     for layer_idx in tqdm(range(num_layers), desc="Training per-layer probes"):
         X = hidden_states[:, layer_idx, :]   # (N, hidden_dim)
-
+        breakpoint()
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = labels[train_idx], labels[test_idx]
 
@@ -97,7 +99,9 @@ def train_probe_per_layer(
             solver="lbfgs",
             class_weight="balanced" if BALANCED else None,
         )
+        breakpoint()
         clf.fit(X_train, y_train)
+        breakpoint()
 
         if layer_idx == 0:
             print(f"\n[Debug] Layer {layer_idx} | "
@@ -106,8 +110,8 @@ def train_probe_per_layer(
             
         train_acc = accuracy_score(y_train, clf.predict(X_train))
         test_acc  = accuracy_score(y_test,  clf.predict(X_test))
-        proba     = clf.predict_proba(X_test)[:, 1]
-        auroc     = roc_auc_score(y_test, proba)
+        proba = clf.predict_proba(X_test)[:, 1]
+        auroc = roc_auc_score(y_test, proba)
 
         results.append({
             "layer":     layer_idx,

@@ -47,10 +47,10 @@
   label distribution : {0: 3224, 1: 449}  (label1 비율 12.2%)
   test set           : {0: 90, 1: 90}
 
-  strategy  best_layer  AUROC   acc     layer0_AUROC  Delta(peak-layer0)
-  first      12         0.8211  0.7444  0.5725        +0.249
-  mean       12         0.8769  0.8000  0.6794        +0.198
-  last       12         0.8627  0.7667  0.5352        +0.328
+  strategy  best_layer  AUROC    acc    layer0_AUROC  Delta(peak-layer0)
+  first      12         0.8211  0.7444    0.5725        +0.249
+  mean       12         0.8769  0.8000    0.6794        +0.198
+  last       12         0.8627  0.7667    0.5352        +0.328
 
   변화 일어나는 레이어
   first : peak layer 12 = 37.5%
@@ -77,10 +77,10 @@
   label distribution : {0: 3141, 1: 477}  (label1 비율 13.2%)
   test set           : {0: 96, 1: 95}
 
-  strategy  best_layer  AUROC   acc     layer0_AUROC  Delta(peak-layer0)
-  first      15         0.7787  0.7330  0.5379        +0.241
-  mean       12         0.8811  0.8220  0.6739        +0.207
-  last       18         0.8556  0.7696  0.6195        +0.236
+  strategy  best_layer  AUROC     acc     layer0_AUROC  Delta(peak-layer0)
+  first      15         0.7787  0.7330      0.5379        +0.241
+  mean       12         0.8811  0.8220      0.6739        +0.207
+  last       18         0.8556  0.7696      0.6195        +0.236
 
   변화 일어나는 레이어
   first : peak layer 15 = 46.9%
@@ -103,7 +103,7 @@
   Transformer AUROC=0.7839  acc=0.7225  (probe보다 낮음)
 
 ====================================================================
-# 2. Pooling Strategy 비교
+# 2. Pooling Strategy
 ====================================================================
 
 mean > last > first  (AUROC, acc 모두, 3개 모델 공통)
@@ -125,10 +125,8 @@ Acc gap (mean - first):
 
 해석:
   - first가 유독 낮은 건 첫 번째 토큰 하나만으로는 정보 부족
-  - mean이 last보다 일관되게 높은 건 답변 전체 토큰의 평균이
-    환각 상태를 더 안정적으로 캡처함을 의미
-  - 이 패턴이 3개 모델에서 일관되므로 모델 아키텍처에 무관한
-    일반적 현상으로 볼 수 있음
+  - mean이 last보다 일관되게 높은 건 답변 전체 토큰의 평균이 환각 상태를 더 안정적으로 캡처함을 의미
+  - 이 패턴이 3개 모델에서 일관되므로 모델 아키텍처에 무관한 일반적 현상으로 볼 수 있음
 
 ====================================================================
 # 3. Peak Layer 위치 비교
@@ -140,12 +138,10 @@ Acc gap (mean - first):
   Mistral-7b    12               37.5%
 
   공통점: 전체 레이어의 30~47% 지점에서 peak
-  -> 선행 연구(On the Universal Truthfulness Hyperplane, EMNLP 2024)와
-    일치하는 중간 레이어 집중 패턴
+  -> 선행 연구(On the Universal Truthfulness Hyperplane, EMNLP 2024)와 일치하는 중간 레이어 집중 패턴
 
-  차이점: Mistral의 last strategy peak가 layer 18 (56.3%)으로
-  Llama 계열보다 늦게 나타남
-  -> 아키텍처 차이에 따른 표상 형성 시점 차이 가능성
+  차이점: Mistral의 last strategy peak가 layer 18 (56.3%)으로 Llama 계열보다 늦게 나타남
+  -> 아키텍처 차이에 따른 표상 형성 시점 차이 가능성?
 
 ====================================================================
 # 4. Sequence Model vs Probe
@@ -159,13 +155,11 @@ Acc gap (mean - first):
   Mistral-7b    0.8811       0.7839             0.7836
 
 해석:
-  - 레이어 간 sequential 패턴보다 특정 레이어의 단일 표상이
-    환각 상태를 더 잘 분리함
+  - 레이어 간 sequential 패턴보다 특정 레이어의 단일 표상이 환각 상태를 더 잘 분리함
   - 환각 신호가 특정 레이어에 국소적으로 집중되어 있음을 시사
   - Hyperplane 가설을 지지하는 간접 근거
 
-  단, Sequence model 학습 샘플 수가 ~660개로 적어서
-  underfitting 가능성도 배제할 수 없음 (limitation으로 명시 필요)
+  단, Sequence model 학습 샘플 수가 ~660개로 적어 underfitting 가능성도 배제할 수 없음
 
 ====================================================================
 # 5. 모델 간 비교
@@ -188,21 +182,18 @@ Acc gap (mean - first):
 # 6. 가설 검증 최종 판정
 ====================================================================
 
-  검증 항목                        Llama-2-7b  Llama-3.1-8b  Mistral-7b  판정
-  AUROC > 0.65 (선형 분리 가능)    0.9265      0.8769        0.8811      PASS
-  Acc > 0.75 (balanced test)       0.8454      0.8000        0.8220      PASS
-  Peak layer 30~50% 구간           31%         38%           38%         PASS
-  mean > last > first 일관성       YES         YES           YES         PASS
-  Probe > Sequence model           YES         YES           YES         PASS
-  Layer 0 대비 유의미한 상승 (Δ)   +0.276      +0.198        +0.207      PASS
+  검증 항목                        Llama-2-7b  Llama-3.1-8b  Mistral-7b 
+  AUROC > 0.65 (선형 분리 가능)      0.9265      0.8769        0.8811    
+  Acc > 0.75 (balanced test)      0.8454      0.8000        0.8220   
+  Peak layer 30~50% 구간             31%         38%           38%       
+  mean > last > first 일관성         YES         YES           YES    
+  Probe > Sequence model           YES         YES           YES 
+  Layer 0 대비 유의미한 상승 (\Delta)      +0.276      +0.198        +0.207   
 
   결론:
-  3개 모델(Llama-2-7b, Llama-3.1-8b, Mistral-7b) 모두에서
-  중간 레이어(전체의 30~47%)에 Linguistic Hyperplane이 존재함을 확인.
-  특히 mean pooling 전략에서 AUROC 0.88~0.93으로 일관되게 높은 성능.
-  단, 답 생성 전(prompt_last) 위치에서의 검증이 추가되면
-  "모델이 답을 내기 전부터 환각 상태를 인코딩한다"는
-  더 강한 주장이 가능함 [PENDING].
+  3개 모델(Llama-2-7b, Llama-3.1-8b, Mistral-7b) 모두에서 중간 레이어(전체의 30~47%)에 Linguistic Hyperplane이 존재하는 걸로 해석 가능
+  특히 mean pooling에서 AUROC 0.88~0.93으로 일관되게 높은 성능.
+  단, 답 생성 전(prompt_last) 위치에서의 검증이 추가되면 "모델이 답을 내기 전부터 환각 상태를 인코딩한다"는 더 강한 주장이 가능함 [PENDING].
 
 ====================================================================
 # 7. TODO / 미완료 실험

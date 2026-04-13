@@ -7,6 +7,6 @@
 *.npy
 ./*.npy
 ./MechanicalInterpretability
-logs/
+log/
 outputs/
 *.sh

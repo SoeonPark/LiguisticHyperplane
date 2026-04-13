@@ -46,15 +46,39 @@ def build_full_text_candidates(prompt: str, answer: str) -> List[str]:
     """
     Candidate teacher-forced strings to try when reconstructing prompt+answer.
     """
+    # breakpoint()
     answer = answer.strip()
     if not answer:
         return []
 
     candidates: List[str] = []
+    # breakpoint()
     for sep in (" ", "", "\n", "\n "):
         full_text = prompt + sep + answer
         if full_text not in candidates:
             candidates.append(full_text)
+    """
+    (Pdb) full_text
+    "Context: Kiss and Tell is a 1945 American comedy film starring then 17-year-old Shirley Temple as Corliss Archer. 
+    In the film, two teenage girls cause their respective parents much concern when they start to become interested in boys. 
+    The parents' bickering about which girl is the worse influence causes more problems than it solves. 
+    Shirley Temple Black (April 23, 1928 – February 10, 2014) was an American actress, singer, dancer, businesswoman, 
+    and diplomat who was Hollywood's number one box-office draw as a child actress from 1935 to 1938. As an adult, 
+    she was named United States ambassador to Ghana and to Czechoslovakia and also served as Chief of Protocol of the United States.
+    \nQuestion: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
+    \nAnswer:\n Chief of Protocol of the United States"
+    
+    *After ```full_text = prompt + sep + answer```*
+    (Pdb) candidates
+    ["Context: Kiss and Tell is a 1945 American comedy film starring then 17-year-old Shirley Temple as Corliss Archer. 
+    In the film, two teenage girls cause their respective parents much concern when they start to become interested in boys. 
+    The parents' bickering about which girl is the worse influence causes more problems than it solves. 
+    Shirley Temple Black (April 23, 1928 – February 10, 2014) was an American actress, singer, dancer, businesswoman, 
+    and diplomat who was Hollywood's number one box-office draw as a child actress from 1935 to 1938. As an adult, 
+    she was named United States ambassador to Ghana and to Czechoslovakia and also served as Chief of Protocol of the United States.
+    \nQuestion: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
+    \nAnswer:\n Chief of Protocol of the United States"]
+    """
     return candidates
 
 
@@ -79,6 +103,7 @@ def find_answer_token_span(
     """
     prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
     full_ids = tokenizer(full_text, add_special_tokens=False).input_ids
+    breakpoint()
 
     if not full_ids:
         raise ValueError("Full teacher-forced text tokenized to an empty sequence.")
@@ -87,19 +112,24 @@ def find_answer_token_span(
     if full_ids[:len(prompt_ids)] != prompt_ids:
         raise ValueError("Prompt tokens are not a prefix of the reconstructed full text.")
 
+    breakpoint()
     input_ids = full_input_ids[0].detach().cpu().tolist()
     full_start = _find_subsequence(input_ids, full_ids)
+    breakpoint()
     if full_start < 0:
         raise ValueError("Failed to align full_text tokenization inside model input ids.")
 
+    breakpoint()
     start_idx = full_start + len(prompt_ids)
     end_idx = full_start + len(full_ids)
 
+    breakpoint()
     answer_ids = full_ids[len(prompt_ids):]
     slice_ids = input_ids[start_idx:end_idx]
     if slice_ids != answer_ids:
         raise ValueError("Aligned answer tokens do not match the expected answer span.")
 
+    breakpoint()    
     return start_idx, end_idx
 
 
@@ -126,6 +156,7 @@ def tokenize_with_answer_span(model, tokenizer, prompt: str, answer: str):
             boundary_preview = repr(full_text[len(prompt):len(prompt) + 6])
             errors.append(f"{boundary_preview}: {e}")
 
+    # breakpoint()
     raise ValueError(
         "Failed to align answer token span with any prompt/answer boundary variant. "
         + " | ".join(errors[:4])
@@ -151,6 +182,7 @@ def pool_hidden_states(
     Returns:
         1-D numpy array of shape (hidden_dim,)
     """
+    breakpoint()
     span = layer_hidden[start_idx:end_idx]   # (span_len, hidden_dim)
 
     if len(span) == 0:
@@ -180,6 +212,7 @@ def forward_hidden_states_only(model, inputs):
     backbone avoids materializing a large `(seq_len, vocab_size)` tensor and is
     much less memory-hungry for later tokenwise analysis as well.
     """
+    breakpoint()
     forward_kwargs = {
         **inputs,
         "output_hidden_states": True,
@@ -187,14 +220,16 @@ def forward_hidden_states_only(model, inputs):
         "return_dict": True,
     }
 
+    breakpoint()
     backbone = getattr(model, "model", None)
     if backbone is not None and backbone is not model:
         return backbone(**forward_kwargs)
+    breakpoint()
 
     base_model = getattr(model, "base_model", None)
     if base_model is not None and base_model is not model:
         return base_model(**forward_kwargs)
-
+    breakpoint()
     return model(**forward_kwargs)
 
 
@@ -207,12 +242,16 @@ def extract_answer_span_hidden_states(
     Return answer-span hidden states for every transformer layer on CPU.
     Shape per layer: (answer_len, hidden_dim)
     """
+    breakpoint()
     layer_spans = []
     for layer_hs in outputs.hidden_states[1:]:
+        breakpoint()
         span = layer_hs[0, start_idx:end_idx, :]
         if span.shape[0] == 0:
+            breakpoint()
             span = layer_hs[0, -1:, :]
         layer_spans.append(span.detach().cpu())
+        breakpoint()
     return layer_spans
 
 # def extract_hidden_states_single(
@@ -274,23 +313,67 @@ def extract_hidden_states_single(model, tokenizer, prompt, answer, strategy="fir
     if not answer.strip():
         raise ValueError("Empty answer after stripping.")
 
+    # breakpoint()
+    """
+    (Pdb) prompt
+    "Context: Kiss and Tell is a 1945 American comedy film starring then 17-year-old Shirley Temple as Corliss Archer. In the film, 
+    two teenage girls cause their respective parents much concern when they start to become interested in boys. The parents' bickering about which girl is the worse influence causes more problems than it solves. 
+    Shirley Temple Black (April 23, 1928 – February 10, 2014) was an American actress, singer, dancer, businesswoman, and diplomat who was Hollywood's number one box-office draw as a child actress from 1935 to 1938. As an adult, she was named United States ambassador to Ghana and to Czechoslovakia and also served as Chief of Protocol of the United States.
+    \nQuestion: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?\nAnswer:"
+    (Pdb) answer
+    'Chief of Protocol of the United States'
+    """
+    if strategy == "prompt_last":
+        device = next(model.parameters()).device
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        prompt_len = inputs.input_ids.shape[1]
+        
+        start_idx = prompt_len - 1
+        end_idx = prompt_len
+        
+        with torch.no_grad():
+            outputs = forward_hidden_states_only(model, inputs)
+            
+        layer_spans = extract_answer_span_hidden_states(outputs, start_idx, end_idx)
+        layer_vectors = []
+        for span in layer_spans:
+            vec = pool_hidden_states(span, 0, span.shape[0], strategy="first")
+            layer_vectors.append(vec)
+            
+        del outputs
+        del inputs
+        return np.stack(layer_vectors)
+    
     inputs, start_idx, end_idx = tokenize_with_answer_span(
         model,
         tokenizer,
         prompt,
         answer,
     )
+    # breakpoint()
+    """
+    (Pdb) len(prompt)
+    809
+    (Pdb) len(inputs[0])
+    188
+    (Pdb) inputs[0]
+    Encoding(num_tokens=188, attributes=[ids, type_ids, tokens, offsets, attention_mask, special_tokens_mask, overflowing])
+    """
 
     with torch.no_grad():
+        breakpoint()
         outputs = forward_hidden_states_only(model, inputs)
 
+    breakpoint()
     layer_spans = extract_answer_span_hidden_states(outputs, start_idx, end_idx)
 
     layer_vectors = []
     for span in layer_spans:
+        breakpoint()
         vec = pool_hidden_states(span, 0, span.shape[0], strategy)
         layer_vectors.append(vec)
 
+    breakpoint()
     del outputs
     del inputs
 
@@ -307,9 +390,11 @@ def extract_tokenwise_hidden_states_single(
     Keep token-level answer-span hidden states for future logit-lens / tuned-lens
     style analyses on a smaller subset of cases.
     """
+    breakpoint()
     if not answer.strip():
         raise ValueError("Empty answer after stripping.")
 
+    breakpoint()
     inputs, start_idx, end_idx = tokenize_with_answer_span(
         model,
         tokenizer,
@@ -318,8 +403,10 @@ def extract_tokenwise_hidden_states_single(
     )
 
     with torch.no_grad():
+        breakpoint()
         outputs = forward_hidden_states_only(model, inputs)
 
+    breakpoint()
     layer_spans = extract_answer_span_hidden_states(outputs, start_idx, end_idx)
 
     tokenwise_hidden_states = torch.stack(
@@ -364,9 +451,11 @@ def extract_all_hidden_states(
     all_hs = []
     all_labels = []
 
+    breakpoint()
     model.eval()
 
     for item in tqdm(cases, desc=f"Extracting hidden states [strategy={strategy}]"):
+        breakpoint()
         label = item["label"]
 
         prompt = item["prompt_w_context"]
@@ -377,6 +466,7 @@ def extract_all_hidden_states(
 
         try:
             hs = extract_hidden_states_single(model, tokenizer, prompt, answer, strategy)
+            breakpoint()
             all_hs.append(hs)
             all_labels.append(label)
         except Exception as e:
@@ -384,9 +474,11 @@ def extract_all_hidden_states(
                 f"Hidden-state extraction failed for question: {item['question']}"
             ) from e
 
+    breakpoint()
     hidden_states = np.stack(all_hs)          # (N, num_layers, hidden_dim)
-    labels        = np.array(all_labels)       # (N,)
+    labels = np.array(all_labels)       # (N,)
 
+    breakpoint()
     print(f"\nExtraction complete: {len(all_hs)} samples, "
           f"shape={hidden_states.shape}, "
           f"label dist={dict(zip(*np.unique(labels, return_counts=True)))}")
@@ -408,11 +500,13 @@ def extract_tokenwise_hidden_states(
     selected_cases = cases if max_samples is None else cases[:max_samples]
     records = []
 
+    breakpoint()
     model.eval()
 
     for idx, item in enumerate(
         tqdm(selected_cases, desc="Extracting tokenwise hidden states")
     ):
+        breakpoint()
         prompt = item["prompt_w_context"]
         answer = item["ans_w_context"]
         record = extract_tokenwise_hidden_states_single(model, tokenizer, prompt, answer)

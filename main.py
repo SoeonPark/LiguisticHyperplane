@@ -13,11 +13,16 @@ for i, arg in enumerate(sys.argv):
         _gpu = sys.argv[i + 1]
 os.environ["CUDA_VISIBLE_DEVICES"] = _gpu
 
+import numpy as np
+
+import case13_result_summary as c13s
 import config
 import data_utils as du
 import extract_hidden_state as ehs
 import layer_analysis as la
+import layer_sequence_model as lsm
 import linear_probe as lp
+import sampled_layer_probe as slp
 import analysis_extended as ae
 import torch
 
@@ -55,6 +60,9 @@ def build_paths(
         "hs_dir": os.path.join(base, "hidden_states"),
         "tokenwise_dir": os.path.join(base, "tokenwise"),
         "probe_dir": os.path.join(base, "probe_results"),
+        "probe_sampled_dir": os.path.join(base, "probe_results_sampled"),
+        "sequence_dir": os.path.join(base, "sequence_results"),
+        "summary_dir": os.path.join(base, "summary"),
         "figure_dir": os.path.join(base, "figures"),
         "log_dir": os.path.join(base, "logs"),
         "exp_name": exp_name,
@@ -64,6 +72,14 @@ def build_paths(
 def _strategies_to_run(strategy_arg: str):
     """--strategy all  →  ['first', 'mean', 'last'],  else single."""
     return ALL_STRATEGIES if strategy_arg == "all" else [strategy_arg]
+
+
+def _sequence_models_to_run(model_arg: str) -> list[str]:
+    return ["bilstm", "transformer"] if model_arg == "both" else [model_arg]
+
+
+def _sampling_scopes_to_run(scope_arg: str) -> list[str]:
+    return ["train", "dataset"] if scope_arg == "both" else [scope_arg]
 
 
 def _cleanup_memory() -> None:
@@ -97,6 +113,89 @@ def _expected_probe_metadata(hidden_states, hs_meta: dict) -> dict:
         "source_model_name": hs_meta.get("model_name"),
         "source_num_cases": hs_meta.get("num_cases"),
     }
+
+
+def _expected_case13_num_samples(
+    labels: np.ndarray,
+    sampling_scope: str,
+    sampling_method: str,
+) -> int:
+    num_samples = int(labels.shape[0])
+    if sampling_scope == "dataset" and sampling_method != "none":
+        _, counts = np.unique(labels, return_counts=True)
+        if len(counts) >= 2:
+            num_samples = int(min(counts) * 2)
+    return num_samples
+
+
+def _expected_sampled_probe_metadata(
+    hidden_states: np.ndarray,
+    labels: np.ndarray,
+    args,
+    sampling_scope: str,
+) -> dict:
+    return {
+        "sampling_method": args.sampling_method,
+        "sampling_scope": sampling_scope,
+        "probe_test_size": config.PROBE_TEST_SIZE,
+        "probe_max_iter": config.PROBE_MAX_ITER,
+        "random_seed": config.RANDOM_SEED,
+        "num_samples": _expected_case13_num_samples(
+            labels,
+            sampling_scope,
+            args.sampling_method,
+        ),
+        "num_layers": int(hidden_states.shape[1]),
+        "hidden_dim": int(hidden_states.shape[2]),
+    }
+
+
+def _build_sequence_model_config(args, sampling_scope: str) -> dict:
+    return {
+        "sampling_method": args.sampling_method,
+        "sampling_scope": sampling_scope,
+        "test_size": config.PROBE_TEST_SIZE,
+        "val_size": args.sequence_val_size,
+        "random_seed": config.RANDOM_SEED,
+        "epochs": args.sequence_epochs,
+        "batch_size": args.sequence_batch_size,
+        "learning_rate": args.sequence_lr,
+        "weight_decay": args.sequence_weight_decay,
+        "patience": args.sequence_patience,
+        "dropout": args.sequence_dropout,
+        "model_dim": args.sequence_model_dim,
+        "lstm_hidden_dim": args.lstm_hidden_dim,
+        "lstm_layers": args.lstm_layers,
+        "transformer_layers": args.transformer_layers,
+        "transformer_heads": args.transformer_heads,
+        "transformer_ff_dim": args.transformer_ff_dim,
+    }
+
+
+def _expected_sequence_metadata(
+    hidden_states: np.ndarray,
+    labels: np.ndarray,
+    args,
+    model_type: str,
+    sampling_scope: str,
+) -> tuple[dict, dict]:
+    model_config = _build_sequence_model_config(args, sampling_scope)
+    expected_metadata = {
+        "model_type": model_type,
+        "sampling_method": args.sampling_method,
+        "sampling_scope": sampling_scope,
+        "input_shape": {
+            "num_samples": _expected_case13_num_samples(
+                labels,
+                sampling_scope,
+                args.sampling_method,
+            ),
+            "num_layers": int(hidden_states.shape[1]),
+            "hidden_dim": int(hidden_states.shape[2]),
+        },
+        "config": model_config,
+    }
+    return expected_metadata, model_config
 
 
 # ── Phase 0 ───────────────────────────────────────────────────────────────────
@@ -382,6 +481,165 @@ def phase_analyze_all(paths: dict, args, strategies: list) -> None:
     phase_attention(paths, args)
     print("Phase analyze_all completed. All analyses are done for the specified strategies.")
 
+
+# ── Case13: Sampled Probe ────────────────────────────────────────────────────
+def phase_probe_sampled(paths: dict, args, strategy: str, sampling_scope: str) -> None:
+    print("\n" + "=" * 60)
+    print(
+        f"Phase case13_probe: Sampled layer probe  [{paths['exp_name']}]  "
+        f"strategy={strategy}  scope={sampling_scope}  sampling={args.sampling_method}"
+    )
+    print("=" * 60)
+
+    hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
+    expected_metadata = _expected_sampled_probe_metadata(
+        hidden_states,
+        labels,
+        args,
+        sampling_scope,
+    )
+
+    if not args.force_recompute:
+        is_current, reason = slp.sampled_probe_cache_is_current(
+            strategy,
+            args.sampling_method,
+            sampling_scope,
+            probe_dir=paths["probe_sampled_dir"],
+            expected_metadata=expected_metadata,
+        )
+        breakpoint()
+        if is_current:
+            print("[skip] Reusing sampled probe results.")
+            payload = slp.load_sampled_probe_results(
+                strategy,
+                args.sampling_method,
+                sampling_scope,
+                probe_dir=paths["probe_sampled_dir"],
+            )
+            breakpoint()
+            slp.print_summary(payload)
+            return
+        print(f"[recompute] Sampled probe cache invalid: {reason}")
+
+    cases = du.load_cases(paths["cases"])
+    payload = slp.train_sampled_probe_per_layer(
+        hidden_states,
+        labels,
+        cases=cases,
+        sampling_method=args.sampling_method,
+        sampling_scope=sampling_scope,
+    )
+    slp.save_sampled_probe_results(
+        payload,
+        strategy,
+        args.sampling_method,
+        sampling_scope,
+        probe_dir=paths["probe_sampled_dir"],
+    )
+    slp.print_summary(payload)
+
+
+# ── Case13: Sequence Model ───────────────────────────────────────────────────
+def phase_sequence_model(
+    paths: dict,
+    args,
+    strategy: str,
+    model_type: str,
+    sampling_scope: str,
+) -> None:
+    print("\n" + "=" * 60)
+    print(
+        f"Phase case13_sequence: Layer sequence classifier  [{paths['exp_name']}]  "
+        f"strategy={strategy}  model={model_type}  "
+        f"scope={sampling_scope}  sampling={args.sampling_method}"
+    )
+    print("=" * 60)
+
+    breakpoint()
+    hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
+    expected_metadata, model_config = _expected_sequence_metadata(
+        hidden_states,
+        labels,
+        args,
+        model_type,
+        sampling_scope,
+    )
+
+    if not args.force_recompute:
+        is_current, reason = lsm.sequence_result_cache_is_current(
+            strategy,
+            model_type,
+            args.sampling_method,
+            sampling_scope,
+            save_dir=paths["sequence_dir"],
+            expected_metadata=expected_metadata,
+        )
+        if is_current:
+            print("[skip] Reusing sequence-model results.")
+            payload = lsm.load_sequence_results(
+                strategy,
+                model_type,
+                args.sampling_method,
+                sampling_scope,
+                save_dir=paths["sequence_dir"],
+            )
+            lsm.print_sequence_summary(payload)
+            return
+        print(f"[recompute] Sequence-model cache invalid: {reason}")
+
+    cases = du.load_cases(paths["cases"])
+    payload = lsm.train_layer_sequence_model(
+        hidden_states,
+        labels,
+        cases=cases,
+        model_type=model_type,
+        model_config=model_config,
+    )
+    lsm.save_sequence_results(
+        payload,
+        strategy,
+        model_type,
+        args.sampling_method,
+        sampling_scope,
+        save_dir=paths["sequence_dir"],
+    )
+    lsm.print_sequence_summary(payload)
+
+
+# ── Case13: Summary ──────────────────────────────────────────────────────────
+def phase_summary(paths: dict) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase case13_summary: Result summary  [{paths['exp_name']}]")
+    print("=" * 60)
+
+    summary_paths = c13s.build_case13_summary(
+        probe_dir=paths["probe_sampled_dir"],
+        sequence_dir=paths["sequence_dir"],
+        summary_dir=paths["summary_dir"],
+    )
+    print(f"  CSV  : {summary_paths['csv_path']}")
+    print(f"  Plot : {summary_paths['plot_path']}")
+
+
+def phase_case13_all(paths: dict, args, strategies: list[str]) -> None:
+    print("\n" + "=" * 60)
+    print(f"Phase case13_all: Running sampled probe + sequence models  [{paths['exp_name']}]")
+    print("=" * 60)
+
+    phase_data(paths, args)
+    sampling_scopes = _sampling_scopes_to_run(args.sampling_scope)
+    sequence_models = _sequence_models_to_run(args.sequence_model)
+
+    for strategy in strategies:
+        phase_extract(paths, args, strategy)
+        for sampling_scope in sampling_scopes:
+            phase_probe_sampled(paths, args, strategy, sampling_scope)
+            for model_type in sequence_models:
+                phase_sequence_model(paths, args, strategy, model_type, sampling_scope)
+
+    phase_summary(paths)
+    print("Phase case13_all completed.")
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -394,7 +652,8 @@ def main() -> None:
                         choices=[
                             "all", "data", "extract", "probe", "visualize", "token_pos",
                             "extract_tokenwise", "probe_direction", "pca", "cka",
-                            "attention", "analyze_all"
+                            "attention", "analyze_all",
+                            "probe_sampled", "sequence_model", "summary", "case13_all"
                         ]
                     )
     parser.add_argument("--strategy", type=str, default="first",
@@ -409,6 +668,28 @@ def main() -> None:
                         default=config.ANSWER_TYPES)
     parser.add_argument("--balanced", action="store_true",
                         help="class_weight='balanced' in LogisticRegression")
+    parser.add_argument("--sampling_method", type=str, default="undersample",
+                        choices=["none", "undersample"],
+                        help="How to balance Case 1/Case 3 labels for sampled probe/sequence-model phases.")
+    parser.add_argument("--sampling_scope", type=str, default="train",
+                        choices=["train", "dataset", "both"],
+                        help="Balance only the train split or the full dataset before splitting.")
+    parser.add_argument("--sequence_model", type=str, default="both",
+                        choices=["bilstm", "transformer", "both"],
+                        help="Which across-layer sequence model to run for case13 phases.")
+    parser.add_argument("--sequence_epochs", type=int, default=20)
+    parser.add_argument("--sequence_batch_size", type=int, default=32)
+    parser.add_argument("--sequence_lr", type=float, default=1e-3)
+    parser.add_argument("--sequence_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--sequence_patience", type=int, default=5)
+    parser.add_argument("--sequence_val_size", type=float, default=0.1)
+    parser.add_argument("--sequence_dropout", type=float, default=0.1)
+    parser.add_argument("--sequence_model_dim", type=int, default=256)
+    parser.add_argument("--lstm_hidden_dim", type=int, default=128)
+    parser.add_argument("--lstm_layers", type=int, default=1)
+    parser.add_argument("--transformer_layers", type=int, default=2)
+    parser.add_argument("--transformer_heads", type=int, default=4)
+    parser.add_argument("--transformer_ff_dim", type=int, default=512)
     parser.add_argument("--gpu", "-g", type=str, default="0")
     parser.add_argument("--attn_max_samples", type=int, default=200, help="Max samples for attention analysis (Phase 8). Default 200.")
     parser.add_argument("--tokenwise_max_samples", type=int, default=128,
@@ -437,12 +718,16 @@ def main() -> None:
     print(f"  Split      : {args.data_split}  (max_samples={args.max_samples or 'all'})")
     print(f"  Strategy   : {args.strategy}")
     print(f"  Balanced   : {args.balanced}")
+    print(f"  Sampling   : {args.sampling_method}  (scope={args.sampling_scope})")
+    print(f"  Seq Model  : {args.sequence_model}")
     print(f"  Force      : {args.force_recompute}")
     print(f"  Experiment : {paths['exp_name']}")
     print(f"  GPU        : {_gpu}")
     print(f"{'='*60}")
 
     strategies = _strategies_to_run(args.strategy)
+    sampling_scopes = _sampling_scopes_to_run(args.sampling_scope)
+    sequence_models = _sequence_models_to_run(args.sequence_model)
 
     if args.phase == "all":
         phase_data(paths, args)
@@ -491,6 +776,23 @@ def main() -> None:
     
     elif args.phase == "analyze_all":
         phase_analyze_all(paths, args, strategies)
+
+    elif args.phase == "probe_sampled":
+        for s in strategies:
+            for sampling_scope in sampling_scopes:
+                phase_probe_sampled(paths, args, s, sampling_scope)
+
+    elif args.phase == "sequence_model":
+        for s in strategies:
+            for sampling_scope in sampling_scopes:
+                for model_type in sequence_models:
+                    phase_sequence_model(paths, args, s, model_type, sampling_scope)
+
+    elif args.phase == "summary":
+        phase_summary(paths)
+
+    elif args.phase == "case13_all":
+        phase_case13_all(paths, args, strategies)
 
 
 if __name__ == "__main__":
