@@ -1,32 +1,44 @@
 """
 analysis_extended.py
 
-Extended analysis modules for the Linguistic Hyperplane project.
-Each function is a self-contained analysis that can be called
-independently via --phase in main.py.
+Extended analysis modules for the Linguisic Hyperplane proving.
+Each function is a self-contained analysis that can be called independently.
 
 Phases:
-  probe_direction  (Phase 5) : probe coef → vocabulary projection
-  pca_analysis     (Phase 6) : PCA top-2 directions, label alignment
-  cka              (Phase 7) : layer-wise CKA between label 0 / label 1 groups
-  attention        (Phase 8) : attention weight ratio to context tokens
+* probe_direction: probe coefficients -> vocabulary direction
+* pca_analysis   : PCA top-k directions, label alignment
+* cka            : layer-wise CKA between label 0 / label 1 group
+* attention      : attention weight ratio to context tokens with visualization
+* transformerLens: 
 """
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import torch
 from sklearn.decomposition import PCA
+from sklearn.metrics import pairwise_distances
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
+from tqdm import tqdm
 import config
 
-
-# ── Shared utility ────────────────────────────────────────────────────────────
+def _ascii_safe_for_plot(text: str) -> str:
+    """
+    Matplotlib's default DejaVu font cannot render every tokenizer-decoded
+    symbol. Convert labels to an ASCII-safe representation for plotting while
+    keeping the original text for console logs.
+    """
+    if text is None:
+        return "<None>"
+    text = text.replace("\n", "\\n").replace("\t", "\\t")
+    safe = text.encode("ascii", "backslashreplace").decode("ascii")
+    return safe if safe else "<empty>"
 
 def _load_probe_coef(probe_dir: str, strategy: str) -> Optional[np.ndarray]:
     """
@@ -43,88 +55,80 @@ def _load_probe_coef(probe_dir: str, strategy: str) -> Optional[np.ndarray]:
     best = max(results, key=lambda r: r["auroc"])
     return best
 
-
-# ── Phase 5: Probe Direction → Vocabulary Projection ─────────────────────────
-
 def analyze_probe_direction(
-    hidden_states: np.ndarray,   # (N, num_layers, hidden_dim)
-    labels: np.ndarray,          # (N,)
-    model,
-    tokenizer,
-    probe_dir: str,
-    strategy: str,
-    figure_dir: str,
-    top_k: int = 30,
+    hidden_states: np.ndarray, # (num_samples, seq_len, hidden_dim)
+    labels: np.ndarray,        # (num_samples,)
+    model, tokenizer,
+    probe_dir: str, strategy: str, figure_dir: str, top_k: int = 30
 ) -> None:
     """
-    Phase 5: Probe direction vocabulary projection.
-
-    1. Re-train LogisticRegression on each layer with ALL data
-    2. Extract coef vector → (hidden_dim,)
-    3. Project onto lm_head.weight → (vocab_size,) scores
-    4. Show top-k tokens in the hallucination direction
-       and top-k tokens in the non-hallucination direction
-
+    Probe direction analysis:
+    
+    1. Retrain LogisticRegression on each layer with ALL data
+    2. Extract probe coefficient vector -> (hidden_dim,)
+    3. Project onto lm_head.weight -> (vocab_size,) scores
+    4. Find top-k tokens with highest positive scores, visualize with bar plot.
+    
     Interpretation:
-      Positive direction  → tokens the model tends to output when hallucinating
-      Negative direction  → tokens associated with grounded/correct answers
+     Positive Direction; Tokens the model tends to output when hallucination. 
+     Negative Direction; Tokens the model tends to output when NOT hallucination.
     """
-    import torch
     os.makedirs(figure_dir, exist_ok=True)
-
+    
     import json
     result_path = os.path.join(probe_dir, f"probe_{strategy}.json")
+    
     with open(result_path) as f:
         results = json.load(f)
     best_layer = max(results, key=lambda r: r["auroc"])["layer"]
-    print(f"\n[Phase 5] Using best layer: {best_layer}  (strategy={strategy})")
-
+    print(f"Best probe layer for strategy '{strategy}': {best_layer}")
+    
     X = hidden_states[:, best_layer, :]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-
-    clf = LogisticRegression(C=1.0, max_iter=config.PROBE_MAX_ITER,
-                             random_state=config.RANDOM_SEED, solver="lbfgs")
+    
+    clf = LogisticRegression(
+        C=1.0,
+        max_iter=config.PROBE_MAX_ITER,
+        random_state=config.RANDOM_SEED,
+        solver="lbfgs",
+    )
     clf.fit(X_scaled, labels)
-
-    # coef: (1, hidden_dim) → (hidden_dim,)
-    direction = clf.coef_[0]
+    
+    # Extract probe coefficient vector
+    direction = clf.coef_[0]  # (hidden_dim,)
     print(f"  Probe direction norm: {np.linalg.norm(direction):.4f}")
-
-    # Project onto lm_head
+    
+    # Project onto lm_head.weight
     try:
-        lm_head_weight = model.lm_head.weight.detach().float().cpu().numpy()
+        lm_head_weight = model.lm_head.weight.detach().cpu().numpy()  # (vocab_size, hidden_dim)
     except AttributeError:
-        print("[skip] Cannot access model.lm_head.weight")
+        print("[ERROR] Model does not have lm_head.weight. Skipping probe direction analysis.")
         return
+    
+    scores = lm_head_weight @ direction  # (vocab_size,)
+    
+    # Top-k tokens with highest positive scores
+    hallu_ids = scores.argsort()[-top_k:][::-1]
+    non_hallu_ids = scores.argsort()[:top_k]
+    
+    hallu_tokens = [(tokenizer.decode([idx]).strip(), float(scores[idx])) for idx in hallu_ids]
+    non_hallu_tokens = [(tokenizer.decode([idx]).strip(), float(scores[idx])) for idx in non_hallu_ids]
 
-    # scores: (vocab_size,)
-    scores = lm_head_weight @ direction
-
-    # Top-k hallucination direction (positive)
-    hall_ids  = scores.argsort()[-top_k:][::-1]
-    # Top-k non-hallucination direction (negative)
-    nohall_ids = scores.argsort()[:top_k]
-
-    hall_tokens  = [(tokenizer.decode([i]).strip(), float(scores[i])) for i in hall_ids]
-    nohall_tokens = [(tokenizer.decode([i]).strip(), float(scores[i])) for i in nohall_ids]
-
-    # Print
-    print(f"\n  Top-{top_k} tokens in HALLUCINATION direction (+):")
-    for tok, sc in hall_tokens:
-        print(f"    {sc:+.4f}  '{tok}'")
-
-    print(f"\n  Top-{top_k} tokens in NON-HALLUCINATION direction (-):")
-    for tok, sc in nohall_tokens:
-        print(f"    {sc:+.4f}  '{tok}'")
-
-    # Plot
+    print(f"     Top-{top_k} tokens aligned with hallucination direction (+):")
+    for token, score in hallu_tokens:
+        print(f"       {token:15s} | score: {score:.4f}")
+    print(f"     Top-{top_k} tokens aligned with non-hallucination direction (-):")
+    for token, score in non_hallu_tokens:
+        print(f"       {token:15s} | score: {score:.4f}")
+        
+    # Plotting
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     for ax, tokens, title, color in [
-        (axes[0], hall_tokens,  "Hallucination direction (+)", "tomato"),
-        (axes[1], nohall_tokens, "Non-hallucination direction (-)", "steelblue"),
+        (axes[0], hallu_tokens, f"Top-{top_k} Tokens Aligned with Hallucination Direction (+)", "tomato"),
+        (axes[1], non_hallu_tokens, f"Top-{top_k} Tokens Aligned with Non-Hallucination Direction (-)", "steelblue"),
     ]:
-        toks = [t for t, _ in tokens[:20]]
+        toks = [_ascii_safe_for_plot(t) for t, _ in tokens[:20]]
         vals = [abs(s) for _, s in tokens[:20]]
         ax.barh(range(len(toks)), vals[::-1], color=color, alpha=0.8)
         ax.set_yticks(range(len(toks)))
@@ -133,17 +137,14 @@ def analyze_probe_direction(
         ax.set_xlabel("Score magnitude", fontsize=10)
         ax.grid(True, alpha=0.3, axis='x')
 
-    plt.suptitle(f"Probe Direction → Vocabulary Projection\n"
+    plt.suptitle(f"Probe Direction -> Vocabulary Projection\n"
                  f"Strategy={strategy}, Best Layer={best_layer}", fontsize=12)
     plt.tight_layout()
     path = os.path.join(figure_dir, f"probe_direction_{strategy}.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
-    print(f"\n  Saved → {path}")
+    print(f"\n  Saved to {path}")
     plt.close()
-
-
-# ── Phase 6: PCA Analysis ─────────────────────────────────────────────────────
-
+    
 def analyze_pca(
     hidden_states: np.ndarray,   # (N, num_layers, hidden_dim)
     labels: np.ndarray,          # (N,)
@@ -152,7 +153,7 @@ def analyze_pca(
     layer_indices: Optional[List[int]] = None,
 ) -> None:
     """
-    Phase 6: PCA top-2 directions with label alignment.
+    PCA top-2 directions with label alignment.
 
     For each selected layer:
       - PCA(n=2) on ALL samples
@@ -161,7 +162,7 @@ def analyze_pca(
         (point-biserial correlation)
 
     Why PCA over t-SNE:
-      - Linear → directly interpretable as "variance directions"
+      - Linear -> directly interpretable as "variance directions"
       - PC1 alignment with label = evidence that the primary variance
         axis in hidden space correlates with hallucination state
     """
@@ -223,11 +224,11 @@ def analyze_pca(
     plt.tight_layout()
     path = os.path.join(figure_dir, f"pca_analysis_{strategy}.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
-    print(f"Saved → {path}")
+    print(f"Saved -> {path}")
     plt.close()
 
     # Print alignment table
-    print(f"\n  PC1 ↔ Label alignment (point-biserial r):")
+    print(f"\n  PC1 <-> Label alignment (point-biserial r):")
     print(f"  {'Layer':>6}  {'r':>8}  {'p':>10}")
     print("  " + "-" * 30)
     for layer_idx, r, p in alignment_scores:
@@ -255,12 +256,10 @@ def analyze_pca(
     plt.tight_layout()
     path2 = os.path.join(figure_dir, f"pca_alignment_curve_{strategy}.png")
     plt.savefig(path2, dpi=150, bbox_inches="tight")
-    print(f"Saved → {path2}")
+    print(f"Saved -> {path2}")
     plt.close()
 
-
-# ── Phase 7: CKA Analysis ─────────────────────────────────────────────────────
-
+    
 def _linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
     """
     Linear CKA between two representation matrices.
@@ -284,22 +283,19 @@ def _linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
         return 0.0
     return float(hsic_kl / np.sqrt(hsic_kk * hsic_ll))
 
-
 def analyze_cka(
-    hidden_states: np.ndarray,   # (N, num_layers, hidden_dim)
-    labels: np.ndarray,          # (N,)
-    strategy: str,
-    figure_dir: str,
-    max_per_class: int = 300,    # subsample for speed (CKA is O(N^2))
+    hidden_states: np.ndarray, # (num_samples, seq_len, hidden_dim)
+    labels: np.ndarray,        # (num_samples,)
+    figure_dir: str, strategy: str, max_per_class: Optional[int] = None
 ) -> None:
     """
-    Phase 7: Layer-wise CKA between label-0 and label-1 groups.
+    Layer-wise CKA between label-0 and label-1 groups.
 
     For each layer:
       - Take min(max_per_class, n_class) samples from each label
       - Compute linear CKA between the two groups' representation matrices
-      - Low CKA → the two groups live in different representational geometry
-        → evidence of different internal states
+      - Low CKA -> the two groups live in different representational geometry
+        -> evidence of different internal states
 
     This is complementary to AUROC:
       AUROC   = "can a linear boundary separate them?"
@@ -311,7 +307,17 @@ def analyze_cka(
     idx0 = np.where(labels == 0)[0]
     idx1 = np.where(labels == 1)[0]
 
-    n = min(max_per_class, len(idx0), len(idx1))
+    if len(idx0) == 0 or len(idx1) == 0:
+        raise ValueError("CKA requires at least one sample from each label.")
+
+    if max_per_class is None:
+        n = min(len(idx0), len(idx1))
+    else:
+        n = min(max_per_class, len(idx0), len(idx1))
+
+    if n <= 0:
+        raise ValueError("CKA sample size must be positive.")
+
     rng = np.random.RandomState(config.RANDOM_SEED)
     idx0_s = rng.choice(idx0, n, replace=False)
     idx1_s = rng.choice(idx1, n, replace=False)
@@ -347,7 +353,7 @@ def analyze_cka(
     plt.tight_layout()
     path = os.path.join(figure_dir, f"cka_{strategy}.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
-    print(f"Saved → {path}")
+    print(f"Saved -> {path}")
     plt.close()
 
     # Print summary
@@ -355,17 +361,17 @@ def analyze_cka(
     print(f"\n  Most geometrically different layer: {best_diff_layer} "
           f"(CKA={cka_scores[best_diff_layer]:.4f})")
 
-
-# ── Phase 8: Attention to Context ─────────────────────────────────────────────
-
 def analyze_attention_to_context(
-    model,
-    tokenizer,
+    model, tokenizer,
     cases: List[Dict],
-    figure_dir: str,
-    max_samples: int = 200,
-    layer_indices: Optional[List[int]] = None,
+    figure_dir: str, max_samples: Optional[int] = None, layer_indices: Optional[List[int]] = None
 ) -> None:
+    """
+    Analyze attention weight ratio to context tokens.
+    
+    For each case, compute the average attention weight to context tokens vs non-context tokens.
+    Visualize the distribution of this ratio for label 0 vs label 1 with box plots or violin plots.
+    """
     """
     Phase 8: Attention weight ratio to context tokens.
 
@@ -383,6 +389,13 @@ def analyze_attention_to_context(
     from tqdm import tqdm as _tqdm
 
     os.makedirs(figure_dir, exist_ok=True)
+
+    if hasattr(model, "set_attn_implementation"):
+        try:
+            model.set_attn_implementation("eager")
+            print("[Phase 8] Attention backend set to eager for attention extraction.")
+        except Exception as e:
+            print(f"[WARN] Failed to switch attention backend to eager: {e}")
 
     model.eval()
     device = next(model.parameters()).device
@@ -423,11 +436,22 @@ def analyze_attention_to_context(
 
         try:
             with torch.no_grad():
-                outputs = model(**inputs, output_attentions=True)
+                outputs = model(
+                    **inputs,
+                    output_attentions=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
         except Exception as e:
             continue
 
         # attentions: tuple of (1, num_heads, seq_len, seq_len) per layer
+        if outputs.attentions is None:
+            raise RuntimeError(
+                "Attention tensors were not returned. "
+                "The model may still be using an attention backend that does not expose attentions."
+            )
+
         for li, attn in enumerate(outputs.attentions):
             attn_np = attn[0].float().cpu().numpy()  # (heads, seq, seq)
             # attention FROM answer_pos TO context range
@@ -471,5 +495,6 @@ def analyze_attention_to_context(
     plt.tight_layout()
     path = os.path.join(figure_dir, "attention_to_context.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
-    print(f"Saved → {path}")
+    print(f"Saved -> {path}")
     plt.close()
+    

@@ -226,6 +226,7 @@ def _filter_single_dataset(
             missing = [t for t in supporting_facts_titles if t not in available_titles]
             if missing:
                 print(f"  - Missing titles (not found in context): {missing}")
+            continue
 
         prompt_wo_context = build_prompt_no_context(question)
         prompt_w_context  = build_prompt_with_context(question, context)

@@ -15,12 +15,12 @@
 export CUDA_VISIBLE_DEVICES="$GPU"
 
 # ── Experiment settings ────────────────────────────────────────────────────────
-MODEL="google/gemma-2-9b"  #"meta-llama/Meta-Llama-3.1-8B"
+MODEL="meta-llama/Meta-Llama-3.1-8B"  #"meta-llama/Meta-Llama-3.1-8B"
 GPU="2"
 PHASE=${1:-all}
 STRATEGY=${2:-all}      # first | mean | last | all(기본)
 
-SUBSET="both"           # fullwiki + distractor, merged
+SUBSET="distractor"           # fullwiki + distractor, merged
 DATA_SPLIT="validation"
 MAX_SAMPLES=""          # 비워두면 split 전체 사용
 BALANCED=""             # "--balanced" 로 바꾸면 class_weight='balanced' 활성화

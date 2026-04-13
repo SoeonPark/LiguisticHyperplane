@@ -23,6 +23,7 @@ import config
 
 # Set by main.py based on --balanced flag
 BALANCED: bool = False
+PROBE_CACHE_VERSION = 1
 
 
 # ── Core Probe Training ───────────────────────────────────────────────────────
@@ -120,20 +121,94 @@ def train_probe_per_layer(
 
 # ── Save / Load ───────────────────────────────────────────────────────────────
 
-def save_probe_results(results: List[Dict], strategy: str, probe_dir: Optional[str] = None) -> None:
+def _probe_paths(save_dir: str, strategy: str) -> Tuple[str, str]:
+    result_path = os.path.join(save_dir, f"probe_{strategy}.json")
+    meta_path = os.path.join(save_dir, f"probe_{strategy}.meta.json")
+    return result_path, meta_path
+
+
+def _build_probe_metadata(
+    results: List[Dict],
+    strategy: str,
+    metadata: Optional[Dict] = None,
+) -> Dict:
+    meta = {
+        "cache_version": PROBE_CACHE_VERSION,
+        "strategy": strategy,
+        "num_layers": int(len(results)),
+    }
+    if metadata:
+        meta.update(metadata)
+    return meta
+
+def save_probe_results(
+    results: List[Dict],
+    strategy: str,
+    probe_dir: Optional[str] = None,
+    metadata: Optional[Dict] = None,
+) -> None:
     save_dir = probe_dir if probe_dir is not None else config.PROBE_RESULT_DIR
     os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, f"probe_{strategy}.json")
-    with open(path, "w") as f:
+    path, meta_path = _probe_paths(save_dir, strategy)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            _build_probe_metadata(results, strategy, metadata),
+            f,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
     print(f"Saved probe results -> {path}")
+    print(f"Saved probe metadata -> {meta_path}")
 
 
 def load_probe_results(strategy: str, probe_dir: Optional[str] = None) -> List[Dict]:
     load_dir = probe_dir if probe_dir is not None else config.PROBE_RESULT_DIR
-    path = os.path.join(load_dir, f"probe_{strategy}.json")
+    path, _ = _probe_paths(load_dir, strategy)
     with open(path) as f:
         return json.load(f)
+
+
+def load_probe_metadata(strategy: str, probe_dir: Optional[str] = None) -> Dict:
+    load_dir = probe_dir if probe_dir is not None else config.PROBE_RESULT_DIR
+    _, meta_path = _probe_paths(load_dir, strategy)
+    with open(meta_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def probe_cache_is_current(
+    strategy: str,
+    probe_dir: Optional[str] = None,
+    expected_metadata: Optional[Dict] = None,
+) -> Tuple[bool, str]:
+    load_dir = probe_dir if probe_dir is not None else config.PROBE_RESULT_DIR
+    path, meta_path = _probe_paths(load_dir, strategy)
+
+    for file_path in (path, meta_path):
+        if not os.path.exists(file_path):
+            return False, f"missing probe cache file: {file_path}"
+
+    try:
+        meta = load_probe_metadata(strategy, probe_dir=load_dir)
+    except Exception as e:
+        return False, f"failed to read probe metadata: {e}"
+
+    if meta.get("cache_version") != PROBE_CACHE_VERSION:
+        return False, (
+            f"probe cache version mismatch "
+            f"({meta.get('cache_version')} != {PROBE_CACHE_VERSION})"
+        )
+    if meta.get("strategy") != strategy:
+        return False, f"strategy mismatch in probe cache ({meta.get('strategy')} != {strategy})"
+
+    if expected_metadata:
+        for key, expected_value in expected_metadata.items():
+            if meta.get(key) != expected_value:
+                return False, f"metadata mismatch for '{key}' ({meta.get(key)} != {expected_value})"
+
+    return True, "ok"
 
 
 # ── Summary Printer ───────────────────────────────────────────────────────────

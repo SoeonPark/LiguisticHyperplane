@@ -10,22 +10,28 @@
 #   bash run_0.sh visualize
 #   bash run_0.sh data
 
-# nohup bash run_0.sh > llama3.log 2>&1 &
+# nohup bash run_0.sh > llama2_13b_distractorOnly.log 2>&1 &
+# nohup bash run_0.sh > llama3_distractorOnly.log 2>&1 &
 # nohup bash run_0.sh probe > llama3_probe.log 2>&1 &
-
-export CUDA_VISIBLE_DEVICES="0"
+# export CUDA_DEVICE_ORDER="PCI_BUS_ID"
+# export NCCL_P2P_DISABLE=1
+# export NCCL_IB_DISABLE=1
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# export CUBLAS_WORKSPACE_CONFIG=:4096:8
+# export OMP_NUM_THREADS=4
+# export MKL_NUM_THREADS=4
 
 # ── Experiment settings ────────────────────────────────────────────────────────
-MODEL="meta-llama/Meta-Llama-3.1-8B"
+MODEL="meta-llama/Llama-2-13b-hf"
 GPU="0"
 PHASE=${1:-all}
 STRATEGY=${2:-all}      # first | mean | last | all(기본)
 
-SUBSET="both"           # fullwiki + distractor, merged
+SUBSET="distractor"           # fullwiki + distractor, merged
 DATA_SPLIT="validation"
 MAX_SAMPLES=""          # 비워두면 split 전체 사용
 BALANCED=""             # "--balanced" 로 바꾸면 class_weight='balanced' 활성화
-TAG="sample"                  # 추가 suffix 없음
+TAG="distractorOnly"                  # 추가 suffix 없음
 
 # ── Display ────────────────────────────────────────────────────────────────────
 echo "========================================"
