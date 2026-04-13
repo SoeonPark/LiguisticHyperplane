@@ -19,11 +19,10 @@ import case13_result_summary as c13s
 import config
 import data_utils as du
 import extract_hidden_state as ehs
-import layer_analysis as la
 import layer_sequence_model as lsm
 import linear_probe as lp
 import sampled_layer_probe as slp
-import analysis_extended as ae
+import visualize as vis
 import torch
 
 ALL_STRATEGIES = ["first", "mean", "last"]
@@ -359,8 +358,8 @@ def phase_visualize(paths: dict, strategy: str) -> None:
     results = lp.load_probe_results(strategy, probe_dir=paths["probe_dir"])
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
 
-    la.plot_layer_accuracy({strategy: results}, figure_dir=paths["figure_dir"])
-    la.plot_tsne(hidden_states, labels, strategy=strategy, figure_dir=paths["figure_dir"])
+    vis.plot_layer_accuracy({strategy: results}, figure_dir=paths["figure_dir"])
+    vis.plot_tsne(hidden_states, labels, strategy=strategy, figure_dir=paths["figure_dir"])
     print("Phase 3 completed. You can now run Phase 4 to compare token position strategies.")
 
 
@@ -382,7 +381,7 @@ def phase_token_pos(paths: dict, args) -> None:
         lp.print_summary(results_dict[strategy])
         _cleanup_memory()
 
-    la.plot_token_position_comparison(results_dict, figure_dir=paths["figure_dir"])
+    vis.plot_token_position_comparison(results_dict, figure_dir=paths["figure_dir"])
     print("Phase 4 completed. You can now run Phase 5 to analyze probe directions.")
 
 
@@ -395,7 +394,7 @@ def phase_probe_direction(paths: dict, args, strategy: str) -> None:
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
     model, tokenizer = du.load_model_and_tokenizer(args.model)
     try:
-        ae.analyze_probe_direction(
+        vis.analyze_probe_direction(
             hidden_states=hidden_states,
             labels=labels,
             model=model,
@@ -419,7 +418,7 @@ def phase_pca(paths: dict, args, strategy: str) -> None:
  
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
  
-    ae.analyze_pca(
+    vis.analyze_pca(
         hidden_states=hidden_states,
         labels=labels,
         strategy=strategy,
@@ -436,7 +435,7 @@ def phase_cka(paths: dict, args, strategy: str) -> None:
  
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
  
-    ae.analyze_cka(
+    vis.analyze_cka(
         hidden_states=hidden_states,
         labels=labels,
         strategy=strategy,
@@ -454,7 +453,7 @@ def phase_attention(paths: dict, args) -> None:
     cases = du.load_cases(paths["cases"])
     model, tokenizer = du.load_model_and_tokenizer(args.model)
     try:
-        ae.analyze_attention_to_context(
+        vis.analyze_attention_to_context(
             model=model,
             tokenizer=tokenizer,
             cases=cases,
