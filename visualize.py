@@ -158,10 +158,10 @@ def plot_token_position_comparison(
 
 # Figure 4: Probe AUROC at positions
 def _probe_auroc_at_positions(
-    model, tokenizer, 
+    model, tokenizer,
     cases: List[Dict],
     labels: np.ndarray,
-    token_positions: List[int],
+    token_positions: str,
     layer_index: int,
 ) -> float:
     """
@@ -184,7 +184,8 @@ def _probe_auroc_at_positions(
         context_end = context_start + context_len
         
         # Question offset
-        prefix_context = f"Context: {item["context"]}\n"
+        ctx_text = item["context"]
+        prefix_context = f"Context: {ctx_text}\n"
         q_start = len(tokenizer(prefix_context + "Question: ", add_special_tokens=False)["input_ids"])
         q_len = len(tokenizer(item["question"], add_special_tokens=False)["input_ids"])
         q_end = q_start + q_len
@@ -237,6 +238,8 @@ def _probe_auroc_at_positions(
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=config.PROBE_TEST_SIZE, random_state=config.RANDOM_SEED, stratify=y
     )
+    X_train = scaler.fit_transform(X_train)
+    X_test  = scaler.transform(X_test)
     clf = LogisticRegression(
         C=1.0,
         max_iter=config.PROBE_MAX_ITER,
@@ -249,21 +252,111 @@ def _probe_auroc_at_positions(
     return float(roc_auc_score(y_test, proba))
 
 # Figure 5: AUROC curve for multi position
-"""
-여러 token position의 layer-wise AUROC를 한 그래프에 overlay.
-
+def plot_multi_position_auroc(
+    auroc_by_position: Dict[str, List[float]],
+    layer_indices: Optional[List[int]] = None,
+    save: bool = True,
+    filename: str = "multi_position_auroc.png",
+    figure_dir: Optional[str] = None,
+) -> None:
+    """
+    여러 token position의 layer-wise AUROC를 한 그래프에 overlay.
     heatmap의 각 열(position)을 하나의 선으로 그려서 피크 위치 비교.
-"""
+    """
+    save_dir = figure_dir if figure_dir is not None else config.FIGURE_DIR
+    os.makedirs(save_dir, exist_ok=True)
+
+    colors = ["steelblue", "tomato", "seagreen", "orange", "mediumpurple", "brown", "pink"]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    for (pos_name, aurocs), color in zip(auroc_by_position.items(), colors):
+        layers = layer_indices if layer_indices is not None else list(range(len(aurocs)))
+        ax.plot(layers, aurocs, label=pos_name, color=color,
+                linewidth=2, marker="o", markersize=3)
+
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance (0.5)")
+    ax.set_xlabel("Layer", fontsize=12)
+    ax.set_ylabel("AUROC", fontsize=12)
+    ax.set_title("Layer-wise AUROC by Token Position — Hallucination Probe", fontsize=13)
+    ax.legend(fontsize=9, bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.grid(True, alpha=0.3)
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+
+    plt.tight_layout()
+
+    if save:
+        path = os.path.join(save_dir, filename)
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved → {path}")
+
+    plt.show()
+    plt.close()
 
 
 # Figure 6: Samples (same number of hallucination / non-hallucination cases) Probe ACC at positions
-"""
-Hallucination / Non-Hallucination 라벨을 동일한 수로 샘플링 한 결과에 대해서 각 token position에서 probe accuracy를 비교하는 그래프.
-"""
+def plot_sampled_position_accuracy(
+    results_by_position: Dict[str, List[Dict]],
+    save: bool = True,
+    filename: str = "sampled_position_accuracy.png",
+    figure_dir: Optional[str] = None,
+) -> None:
+    """
+    Hallucination / Non-Hallucination 라벨을 동일한 수로 샘플링 한 결과에 대해서
+    각 token position에서 probe accuracy를 비교하는 그래프.
+
+    results_by_position: {position_name: [{layer, accuracy, auroc}, ...]}
+    """
+    save_dir = figure_dir if figure_dir is not None else config.FIGURE_DIR
+    os.makedirs(save_dir, exist_ok=True)
+
+    colors = ["steelblue", "tomato", "seagreen", "orange", "mediumpurple", "brown", "pink"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, metric in zip(axes, ["accuracy", "auroc"]):
+        for (pos_name, results), color in zip(results_by_position.items(), colors):
+            layers = [r["layer"] for r in results]
+            values = [r[metric] for r in results]
+            ax.plot(layers, values, label=pos_name, color=color,
+                    linewidth=2, marker="o", markersize=3)
+
+        ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance (0.5)")
+        ax.set_xlabel("Layer", fontsize=12)
+        ax.set_ylabel(metric.upper(), fontsize=12)
+        ax.set_title(
+            f"Sampled Layer-wise {metric.upper()} by Position\n"
+            "(Balanced Hallucination / Non-Hallucination)",
+            fontsize=12,
+        )
+        ax.legend(fontsize=9, bbox_to_anchor=(1.01, 1), loc="upper left")
+        ax.grid(True, alpha=0.3)
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+
+    plt.tight_layout()
+
+    if save:
+        path = os.path.join(save_dir, filename)
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved → {path}")
+
+    plt.show()
+    plt.close()
+
 
 # Figure 7: Plot token layer heatmap
-"""
-Token Position × Layer AUROC Heatmap.
+def plot_token_layer_heatmap(
+    model, tokenizer,
+    cases: List[Dict],
+    labels: np.ndarray,
+    layer_stride: int = 2,
+    token_positions: Optional[List[str]] = None,
+    save: bool = True,
+    filename: str = "token_layer_heatmap.png",
+    figure_dir: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Token Position × Layer AUROC Heatmap.
 
     X축: 토큰 위치 (ctx_first, ctx_last, q_first, q_last, answer_colon, ans_first, ans_last)
     Y축: 레이어 (0 ~ L-1, stride로 샘플링)
@@ -274,4 +367,179 @@ Token Position × Layer AUROC Heatmap.
 
     Returns:
         auroc_matrix: (num_layers_sampled, num_positions) ndarray
-"""
+    """
+    save_dir = figure_dir if figure_dir is not None else config.FIGURE_DIR
+    os.makedirs(save_dir, exist_ok=True)
+
+    if token_positions is None:
+        token_positions = [
+            "context_start", "context_end",
+            "question_start", "question_end",
+            "answer_colon", "answer_start", "answer_end",
+        ]
+
+    num_layers = model.config.num_hidden_layers + 1  # +1 for embedding layer
+    sampled_layers = list(range(0, num_layers, layer_stride))
+
+    auroc_matrix = np.full((len(sampled_layers), len(token_positions)), np.nan)
+
+    for li, layer_idx in enumerate(tqdm(sampled_layers, desc="Token×Layer AUROC")):
+        for pi, pos_name in enumerate(token_positions):
+            auroc = _probe_auroc_at_positions(
+                model, tokenizer, cases, labels, pos_name, layer_idx
+            )
+            auroc_matrix[li, pi] = auroc
+
+    # Plot heatmap
+    fig_h = max(6, len(sampled_layers) * 0.35 + 2)
+    fig_w = len(token_positions) * 1.6 + 2
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    im = ax.imshow(auroc_matrix, aspect="auto", cmap="RdYlGn", vmin=0.4, vmax=1.0)
+    plt.colorbar(im, ax=ax, label="AUROC")
+
+    ax.set_xticks(range(len(token_positions)))
+    ax.set_xticklabels(token_positions, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(len(sampled_layers)))
+    ax.set_yticklabels([str(l) for l in sampled_layers], fontsize=8)
+    ax.set_xlabel("Token Position", fontsize=12)
+    ax.set_ylabel("Layer", fontsize=12)
+    ax.set_title(
+        "Token Position × Layer AUROC Heatmap\n(Hallucination Probe)",
+        fontsize=13,
+    )
+
+    plt.tight_layout()
+
+    if save:
+        path = os.path.join(save_dir, filename)
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved → {path}")
+
+    plt.show()
+    plt.close()
+
+    return auroc_matrix
+
+
+# Phase 8: Attention to context
+def analyze_attention_to_context(
+    model, tokenizer,
+    cases: List[Dict],
+    figure_dir: str,
+    max_samples: Optional[int] = None,
+    layer_indices: Optional[List[int]] = None,
+) -> None:
+    """
+    Analyze attention weight ratio to context tokens.
+
+    For each sample, at the answer token position:
+      ratio = sum(attn[:, answer_pos, context_range]) /
+              sum(attn[:, answer_pos, :])
+
+    Compares label 0 (non-hallucination) vs label 1 (hallucination).
+    Hypothesis: label 0 attends more to context when generating the answer.
+
+    Uses output_attentions=True. Averaged across attention heads per layer.
+    """
+    os.makedirs(figure_dir, exist_ok=True)
+
+    if hasattr(model, "set_attn_implementation"):
+        try:
+            model.set_attn_implementation("eager")
+            print("[Phase 8] Attention backend set to eager for attention extraction.")
+        except Exception as e:
+            print(f"[WARN] Failed to switch attention backend to eager: {e}")
+
+    model.eval()
+    device = next(model.parameters()).device
+    num_layers = model.config.num_hidden_layers
+
+    if layer_indices is None:
+        layer_indices = list(range(num_layers))
+
+    cases_filtered = [c for c in cases if c.get("label") in [0, 1]]
+    rng = np.random.RandomState(config.RANDOM_SEED)
+    if max_samples is not None and len(cases_filtered) > max_samples:
+        idxs = rng.choice(len(cases_filtered), max_samples, replace=False)
+        cases_filtered = [cases_filtered[i] for i in idxs]
+
+    ratios_by_label = {0: [[] for _ in range(num_layers)],
+                       1: [[] for _ in range(num_layers)]}
+
+    for item in tqdm(cases_filtered, desc="Attention analysis"):
+        label  = item["label"]
+        prompt = item["prompt_w_context"]
+        answer = item["ans_w_context"]
+
+        ctx_start = len(tokenizer("Context: ", add_special_tokens=False).input_ids)
+        ctx_len   = len(tokenizer(item["context"], add_special_tokens=False).input_ids)
+        ctx_end   = ctx_start + ctx_len
+
+        full_text = prompt + " " + answer
+        inputs = tokenizer(full_text, return_tensors="pt").to(device)
+        seq_len = inputs.input_ids.shape[1]
+
+        answer_ids = tokenizer(answer, add_special_tokens=False).input_ids
+        answer_pos = seq_len - len(answer_ids)
+        answer_pos = max(0, min(answer_pos, seq_len - 1))
+
+        try:
+            with torch.no_grad():
+                outputs = model(
+                    **inputs,
+                    output_attentions=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+        except Exception:
+            continue
+
+        if outputs.attentions is None:
+            raise RuntimeError(
+                "Attention tensors were not returned. "
+                "The model may still be using an attention backend that does not expose attentions."
+            )
+
+        for li, attn in enumerate(outputs.attentions):
+            attn_np = attn[0].float().cpu().numpy()  # (heads, seq, seq)
+            attn_row = attn_np[:, answer_pos, :]     # (heads, seq)
+            total = attn_row.sum(axis=1)             # (heads,)
+            ctx_end_clip = min(ctx_end, seq_len)
+            to_ctx = attn_row[:, ctx_start:ctx_end_clip].sum(axis=1)
+            ratio = (to_ctx / (total + 1e-9)).mean()
+            ratios_by_label[label][li].append(float(ratio))
+
+    layers = list(range(num_layers))
+    mean0 = [np.mean(ratios_by_label[0][li]) if ratios_by_label[0][li] else 0.0 for li in layers]
+    mean1 = [np.mean(ratios_by_label[1][li]) if ratios_by_label[1][li] else 0.0 for li in layers]
+    std0  = [np.std(ratios_by_label[0][li])  if ratios_by_label[0][li] else 0.0 for li in layers]
+    std1  = [np.std(ratios_by_label[1][li])  if ratios_by_label[1][li] else 0.0 for li in layers]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(layers, mean0, color="steelblue", linewidth=2,
+            marker="o", markersize=3, label="Non-Hallucination (label 0)")
+    ax.fill_between(layers,
+                    [m - s for m, s in zip(mean0, std0)],
+                    [m + s for m, s in zip(mean0, std0)],
+                    color="steelblue", alpha=0.2)
+    ax.plot(layers, mean1, color="tomato", linewidth=2,
+            marker="o", markersize=3, label="Hallucination (label 1)")
+    ax.fill_between(layers,
+                    [m - s for m, s in zip(mean1, std1)],
+                    [m + s for m, s in zip(mean1, std1)],
+                    color="tomato", alpha=0.2)
+    ax.set_xlabel("Layer", fontsize=12)
+    ax.set_ylabel("Attention ratio to context", fontsize=12)
+    ax.set_title(
+        f"Attention to Context — Label 0 vs 1\n"
+        f"(answer token position, {len(cases_filtered)} samples)",
+        fontsize=12,
+    )
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(figure_dir, "attention_to_context.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"Saved → {path}")
+    plt.close()

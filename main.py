@@ -23,6 +23,7 @@ import layer_sequence_model as lsm
 import linear_probe as lp
 import sampled_layer_probe as slp
 import visualize as vis
+import analysis as ana
 import torch
 
 ALL_STRATEGIES = ["first", "mean", "last"]
@@ -394,7 +395,7 @@ def phase_probe_direction(paths: dict, args, strategy: str) -> None:
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
     model, tokenizer = du.load_model_and_tokenizer(args.model)
     try:
-        vis.analyze_probe_direction(
+        ana.analyze_probe_direction(
             hidden_states=hidden_states,
             labels=labels,
             model=model,
@@ -418,7 +419,7 @@ def phase_pca(paths: dict, args, strategy: str) -> None:
  
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
  
-    vis.analyze_pca(
+    ana.analyze_pca(
         hidden_states=hidden_states,
         labels=labels,
         strategy=strategy,
@@ -435,7 +436,7 @@ def phase_cka(paths: dict, args, strategy: str) -> None:
  
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
  
-    vis.analyze_cka(
+    ana.analyze_cka(
         hidden_states=hidden_states,
         labels=labels,
         strategy=strategy,
@@ -506,7 +507,6 @@ def phase_probe_sampled(paths: dict, args, strategy: str, sampling_scope: str) -
             probe_dir=paths["probe_sampled_dir"],
             expected_metadata=expected_metadata,
         )
-        breakpoint()
         if is_current:
             print("[skip] Reusing sampled probe results.")
             payload = slp.load_sampled_probe_results(
@@ -515,7 +515,6 @@ def phase_probe_sampled(paths: dict, args, strategy: str, sampling_scope: str) -
                 sampling_scope,
                 probe_dir=paths["probe_sampled_dir"],
             )
-            breakpoint()
             slp.print_summary(payload)
             return
         print(f"[recompute] Sampled probe cache invalid: {reason}")
@@ -554,7 +553,6 @@ def phase_sequence_model(
     )
     print("=" * 60)
 
-    breakpoint()
     hidden_states, labels = ehs.load_hidden_states(strategy, hs_dir=paths["hs_dir"])
     expected_metadata, model_config = _expected_sequence_metadata(
         hidden_states,
