@@ -1,3 +1,8 @@
+r"""
+Legacy custom_cad.py is kept below as inert text because the previous file mixed
+import-time evaluation setup, distributed decoding, and CLI execution in one
+path. The runnable implementation starts after this raw string.
+
 import argparse
 import logging
 import os
@@ -31,7 +36,110 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
+# CAD evaluate functions
+import json
+import argparse
+from tqdm import tqdm
+from pathlib import Path
+# from datasets import load_dataset
+# from evaluate import load
+import statistics
+import json
+from collections import defaultdict
+import os
+import evaluate
+from ipdb import set_trace as bp
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from datasets import load_dataset
 
+# evaluate fackKB: Put your huggingface access tokens
+access_token = 
+tokenizer = AutoTokenizer.from_pretrained("roberta-base", padding="max_length", truncation=True)
+factkb = AutoModelForSequenceClassification.from_pretrained("bunsenfeng/FactKB", num_labels = 2, use_auth_token=access_token)
+
+def evaluate_qa(index2ex, eval_file):
+    print(eval_file)
+    all_gold = []
+    all_pred = []
+    all_doc = []
+    all_fact_score = []
+
+    if os.path.exists(eval_file) == False:
+        return 0
+    with open(eval_file, "r") as f:
+        output_data = [json.loads(line) for line in f]
+    cov_em_all = []
+    category2em = defaultdict(list)
+    id2ex_output = {}
+    for i, output in enumerate(output_data):
+        index = output["input_index"]
+        pred = output["string"][0]
+        gold = index2ex[index]["gold_answers"] 
+        if len(pred) < 3:
+            print(pred)
+            continue
+        all_gold.append(gold)
+        all_pred.append(pred)
+        if len(pred) < 3:
+            print(f"pred: {pred}")
+
+        article = index2ex[index]["article"]
+        summary = pred
+        input = [[summary, article]]
+        tokens = tokenizer(input, return_tensors="pt", padding="max_length", truncation=True)
+        result = torch.softmax(factkb(**tokens).logits, dim = 1)
+        # bp()
+        fact_score = result[0][1].item()
+
+        all_fact_score.append(fact_score)
+        all_doc.append(article)
+        output_dict = index2ex[index].copy()
+        output_dict["pred"] = pred
+        id2ex_output[i] = output_dict
+
+    print("fact_score: ", statistics.mean(all_fact_score))
+    # print(statistics.mean(cov_em_all))
+    rouge = evaluate.load('rouge')
+    results = rouge.compute(predictions=all_pred, references=all_gold)
+    print("rouge results: ", results)
+
+    bertscore = evaluate.load("bertscore")
+    results = bertscore.compute(predictions=all_pred, references=all_doc, lang="en")
+    # print("bertscore: ", results)
+    print("bertscore: ")
+    for k, v in results.items():
+        if k in ["precision", "recall", "f1"]:
+            print(f"{k}: {statistics.mean(v)}")
+    return id2ex_output
+
+# read data
+def entity_data(dataset_path):
+    raw_data = []
+    with open(dataset_path) as f:
+        for line in f:
+            ex = json.loads(line)
+            if ex["assigned_process"] == 0:
+                raw_data.append(ex)
+            # break
+        # raw_data = json.loads(f.read())
+    return raw_data
+
+
+if __name__ == "__main__":
+    # args parse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default="./data/cnndm_example_input/cnndm_1_0.jsonl")
+    parser.add_argument("--pred_path", type=str, default="./data/cnndm_example_input/cnndm_1.5_-0.5.jsonl.output_topp0.9_genlen100.jsonl")
+    args = parser.parse_args()
+
+    data_path = args.data_path
+    pred_path = args.pred_path
+    index2ex = entity_data(data_path)
+    evaluate_qa(index2ex, pred_path)
+    
+
+# CAD functually related functions
 def logits_sampling_projection(logits, top_p, one_hot_value):
     assert len(logits.size()) == 3
 
@@ -534,6 +642,685 @@ def main():
                 for export in export_list:
                     f_out.write(json.dumps(export))
                     f_out.write("\n")
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence
+
+import torch
+from tqdm import tqdm
+
+
+@dataclass
+class CADGenerationResult:
+    text: str
+    token_ids: List[int]
+    elapsed_sec: float
+    per_token_ms: float
+    num_prompt_branches: int
+
+
+def read_jsonl(path: str) -> List[Dict]:
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def write_jsonl(records: Iterable[Dict], path: str) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"Saved JSONL -> {path}")
+
+
+def group_by_input_index(records: Sequence[Dict]) -> Dict[int, List[Dict]]:
+    """
+    Grouped the records by input index, and sorted the records in each group by assigned process (if any).
+    1st Data: {"input_index": 0, "assigned_process": 0, "string": "pred1"}
+        When the context is given, prompt to put for Expert model. (e.g., CNN Article + "Summarize the article in three sentences. Summary:")
+    2nd Data: {"input_index": 0, "assigned_process": 1, "string": "pred2"}
+        When the context is not given, prompt to put for Amateur model. (e.g., Only has "Summarize the article in three sentences. Summary:")
+    """
+    grouped: Dict[int, List[Dict]] = defaultdict(list)
+    for record in records:
+        grouped[int(record["input_index"])].append(record)
+    for key in grouped:
+        grouped[key].sort(key=lambda item: int(item.get("assigned_process", 0)))
+    return dict(sorted(grouped.items()))
+
+
+def entity_data(dataset_path: str, assigned_process: int = 0) -> Dict[int, Dict]:
+    examples = {}
+    for ex in read_jsonl(dataset_path):
+        if int(ex.get("assigned_process", assigned_process)) == assigned_process:
+            examples[int(ex["input_index"])] = ex
+    return examples
+
+
+def _top_k_filter(logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    if top_k is None or top_k <= 0 or top_k >= logits.shape[-1]:
+        return logits
+    threshold = torch.topk(logits, top_k, dim=-1).values[..., -1, None]
+    return logits.masked_fill(logits < threshold, torch.finfo(logits.dtype).min)
+
+
+def _top_p_filter(logits: torch.Tensor, top_p: float) -> torch.Tensor:
+    if top_p is None or top_p >= 1.0:
+        return logits
+    if top_p <= 0.0:
+        keep = logits.argmax(dim=-1, keepdim=True)
+        mask = torch.ones_like(logits, dtype=torch.bool)
+        mask.scatter_(-1, keep, False)
+        return logits.masked_fill(mask, torch.finfo(logits.dtype).min)
+
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    sorted_remove = cumulative_probs > top_p
+    sorted_remove[..., 1:] = sorted_remove[..., :-1].clone()
+    sorted_remove[..., 0] = False
+    remove = torch.zeros_like(sorted_remove)
+    remove.scatter_(-1, sorted_indices, sorted_remove)
+    return logits.masked_fill(remove, torch.finfo(logits.dtype).min)
+
+
+def filter_logits_top_p(
+    logits: torch.Tensor,
+    top_p: float,
+    negative_multiplier: bool = False,
+) -> torch.Tensor:
+    if logits.dim() != 3:
+        raise ValueError("logits must have shape (batch, seq, vocab)")
+    if top_p is None or top_p >= 1.0:
+        return logits
+
+    probs = torch.softmax(logits, dim=-1)
+    sorted_probs, indices = torch.sort(probs, dim=-1, descending=True)
+    cum_sum_probs = torch.cumsum(sorted_probs, dim=-1)
+    nucleus = cum_sum_probs < top_p
+    nucleus = torch.cat(
+        [nucleus.new_ones(nucleus.shape[:-1] + (1,)), nucleus[..., :-1]],
+        dim=-1,
+    )
+    valid_indices = nucleus.scatter(2, indices, nucleus)
+    fill_value = 1000.0 if negative_multiplier else -1000.0
+    return logits.masked_fill(valid_indices == 0, fill_value)
+
+
+def logits_sampling_projection(
+    logits: torch.Tensor,
+    top_p: float,
+    one_hot_value: float,
+) -> torch.Tensor:
+    if logits.dim() != 3:
+        raise ValueError("logits must have shape (batch, seq, vocab)")
+    filtered_logits = filter_logits_top_p(logits, top_p=top_p)
+    selected = torch.distributions.Categorical(logits=filtered_logits).sample()
+    return 2 * one_hot_value * torch.nn.functional.one_hot(selected, logits.size(2)) - one_hot_value
+
+
+def sample_next_token(
+    logits: torch.Tensor,
+    top_p: float = 0.9,
+    top_k: int = 0,
+    temperature: float = 1.0,
+    do_sample: bool = True,
+) -> torch.Tensor:
+    if logits.dim() == 3:
+        logits = logits[:, -1, :]
+    if temperature is not None and temperature > 0:
+        logits = logits / temperature
+    logits = _top_k_filter(logits, top_k)
+    logits = _top_p_filter(logits, top_p)
+    if do_sample:
+        probs = torch.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
+    return logits.argmax(dim=-1, keepdim=True)
+
+
+class CAD:
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        num_gpus: str = "1",
+        max_gpu_memory: int = 27,
+        torch_dtype: str = "auto",
+    ):
+        self.model_name = model_name
+        self.device = device
+        self.num_gpus = num_gpus
+        self.max_gpu_memory = max_gpu_memory
+        self.torch_dtype = torch_dtype
+        self.model, self.tokenizer = self.load_model(model_name)
+
+    def load_model(self, model_name: str):
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        kwargs = {}
+        if self.device == "cuda":
+            dtype = torch.float16 if self.torch_dtype in {"auto", "float16", "fp16"} else torch.float32
+            kwargs["torch_dtype"] = dtype
+            if self.num_gpus == "auto":
+                kwargs["device_map"] = "auto"
+            else:
+                n_gpus = int(self.num_gpus)
+                if n_gpus != 1:
+                    kwargs["device_map"] = "auto"
+                    kwargs["max_memory"] = {i: f"{self.max_gpu_memory}GiB" for i in range(n_gpus)}
+        elif self.device != "cpu":
+            raise ValueError("device must be 'cuda' or 'cpu'")
+
+        tokenizer_name = model_name if "vicuna" not in model_name else "huggyllama/llama-7b"
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            **kwargs,
+        )
+        if self.device == "cuda" and self.num_gpus == "1":
+            model.cuda()
+        elif self.device == "cpu":
+            model.cpu()
+        model.eval()
+        return model, tokenizer
+
+    def generate(
+        self,
+        input_text: str,
+        max_new_tokens: int = 100,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        temperature: float = 1.0,
+        do_sample: bool = True,
+        verbose: bool = True,
+        **kwargs,
+    ) -> CADGenerationResult:
+        # breakpoint()
+        device = next(self.model.parameters()).device
+        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(device)
+        start = time.perf_counter()
+        with torch.no_grad():
+            # breakpoint()
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                top_p=top_p,
+                top_k=top_k,
+                temperature=temperature,
+                pad_token_id=self.tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                **kwargs,
+            )
+            # breakpoint()
+        elapsed = time.perf_counter() - start
+        gen_ids = outputs.sequences[0, input_ids.shape[-1]:].detach().cpu().tolist()
+        text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        # breakpoint()
+        if verbose:
+            print(f"MODEL OUTPUT:\n{text}")
+        return CADGenerationResult(
+            text=text,
+            token_ids=[int(x) for x in gen_ids],
+            elapsed_sec=float(elapsed),
+            per_token_ms=float(1000.0 * elapsed / max(len(gen_ids), 1)),
+            num_prompt_branches=1,
+        )
+
+    def generate_weighted(
+        self,
+        input_texts: Sequence[str],
+        weights: Sequence[float],
+        max_new_tokens: int = 100,
+        filter_top_p: float = 1.0,
+        filter_top_p_prior: float = 1.0,
+        projection_top_p: float = 0.9,
+        top_k: int = 0,
+        temperature: float = 1.0,
+        do_sample: bool = True,
+        verbose: bool = True,
+    ) -> CADGenerationResult:
+        if len(input_texts) != len(weights):
+            raise ValueError("input_texts and weights must have the same length")
+        if not input_texts:
+            raise ValueError("at least one input branch is required")
+
+        device = next(self.model.parameters()).device
+        branch_ids = [
+            self.tokenizer(text, return_tensors="pt").input_ids.to(device)
+            for text in input_texts
+        ]
+        generated: List[int] = []
+        eos_id = self.tokenizer.eos_token_id
+
+        start = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                combined = None
+                for ids, weight in zip(branch_ids, weights):
+                    logits = self.model(input_ids=ids, use_cache=False).logits[:, -1:, :].contiguous() # (1, 1, vocab)
+                    """
+                    Logits for the last token in the sequence, shape (1, 1, vocab_size)
+                    (Pdb) logits.shape
+                    torch.Size([1, 1, 32000])
+                    """
+                    # breakpoint()
+                    if weight >= 0:
+                        logits = filter_logits_top_p(logits, top_p=filter_top_p)
+                    else:
+                        logits = filter_logits_top_p(
+                            logits,
+                            top_p=filter_top_p_prior,
+                            negative_multiplier=True,
+                        )
+                    weighted = float(weight) * logits
+                    combined = weighted if combined is None else combined + weighted
+                # breakpoint()
+                next_token = sample_next_token(
+                    combined,
+                    top_p=projection_top_p,
+                    top_k=top_k,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                )
+                # breakpoint()
+                """
+                (Pdb) next_token
+                tensor([[903]], device='cuda:0')
+                (Pdb) next_token.shape
+                torch.Size([1, 1])
+                """
+                token_id = int(next_token.item())
+                generated.append(token_id)
+                next_token = next_token.to(device)
+                branch_ids = [torch.cat([ids, next_token], dim=1) for ids in branch_ids]
+                if eos_id is not None and token_id == eos_id:
+                    break
+        # breakpoint()
+        elapsed = time.perf_counter() - start
+        text = self.tokenizer.decode(generated, skip_special_tokens=True)
+        # breakpoint()
+        if verbose:
+            print(f"MODEL OUTPUT:\n{text}")
+        return CADGenerationResult(
+            text=text,
+            token_ids=generated,
+            elapsed_sec=float(elapsed),
+            per_token_ms=float(1000.0 * elapsed / max(len(generated), 1)),
+            num_prompt_branches=len(input_texts),
+        )
+
+    def generate_dataset(
+        self,
+        data_path: str,
+        output_path: str,
+        max_new_tokens: int = 100,
+        projection_top_p: float = 0.9,
+        filter_top_p: float = 1.0,
+        filter_top_p_prior: float = 1.0,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        temperature: float = 1.0,
+        do_sample: bool = True,
+        limit: Optional[int] = None,
+        print_every: int = 20,
+    ) -> str:
+        records = read_jsonl(data_path)
+        grouped = group_by_input_index(records) # dict type
+        items = list(grouped.items()) # list type
+        # breakpoint()
+        """
+        (Pdb) type(grouped)
+        <class 'dict'>
+        (Pdb) type(records)
+        <class 'list'>
+        (Pdb) type(items)
+        <class 'list'>
+        600
+        (Pdb) len(grouped)
+        300
+        (Pdb) len(grouped[0][0])
+        8
+        (Pdb) grouped[0][1].keys()
+        dict_keys(['input_index', 'assigned_model', 'assigned_process', 'context_string', 'assigned_weight', 'gold_answers', 'filter_p', 'article'])
+        (Pdb) grouped[0][1].keys()
+        dict_keys(['input_index', 'assigned_model', 'assigned_process', 'context_string', 'assigned_weight', 'gold_answers', 'article', 'filter_p'])
+        """
+        if limit is not None:
+            items = items[:limit]
+
+        outputs = []
+        for output_index, (input_index, group) in enumerate(tqdm(items, desc="CAD generation")):
+            # breakpoint()
+            contexts = [row["context_string"] for row in group]
+            weights = [float(row.get("assigned_weight", 1.0)) for row in group]
+
+            if len(contexts) == 1 and abs(weights[0] - 1.0) < 1e-9:
+                result = self.generate(
+                    contexts[0],
+                    max_new_tokens=max_new_tokens,
+                    top_p=top_p,
+                    top_k=top_k,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    verbose=False,
+                )
+                # breakpoint()
+            else:
+                result = self.generate_weighted(
+                    contexts,
+                    weights,
+                    max_new_tokens=max_new_tokens,
+                    filter_top_p=filter_top_p,
+                    filter_top_p_prior=filter_top_p_prior,
+                    projection_top_p=projection_top_p,
+                    top_k=top_k,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    verbose=False,
+                )
+                # breakpoint()
+
+            """(Pdb) result
+            CADGenerationResult(text="Dzhokhar Tsarnaev has been convicted of killing three people in the Boston Marathon bombing two years ago. 
+            What is the time period the story covers? From April 2013 to April 2015 What are some interesting details in the article? 
+            Boston Marathon Victims Remembered on 'One Boston Day' . Read the article The victims of the Boston Marathon bombing. 
+            I’ve attached a video about the Boston Marathon. Watch this", 
+            token_ids=[360, 17599, 554, 8222, 19089, 11441, 5750, 756, 1063, 7602, 18186, 310, 23393, 2211, 2305, 297, 278, 12115, 
+            1085, 25206, 13585, 292, 1023, 2440, 8020, 29889, 1724, 338, 278, 931, 3785, 278, 5828, 18469, 29973, 3645, 3786, 29871, 
+            29906, 29900, 29896, 29941, 304, 3786, 29871, 29906, 29900, 29896, 29945, 1724, 526, 777, 8031, 4902, 297, 278, 4274, 29973, 
+            12115, 1085, 25206, 7229, 9893, 22738, 287, 373, 525, 6716, 12115, 8373, 29915, 869, 7523, 278, 4274, 450, 6879, 9893, 310, 
+            278, 12115, 1085, 25206, 13585, 292, 29889, 306, 30010, 345, 10959, 263, 4863, 1048, 278, 12115, 1085, 25206, 29889, 24274, 445], 
+            elapsed_sec=22.01120653981343, per_token_ms=220.1120653981343, num_prompt_branches=2)
+            """
+            if print_every > 0 and output_index % print_every == 0:
+                print(
+                    f"[{output_index}] input_index={input_index} "
+                    f"branches={len(contexts)} weights={weights} "
+                    f"tok_ms={result.per_token_ms:.2f}"
+                )
+                print(result.text[:300].replace("\n", "\\n"))
+            """
+            [0] input_index=0 branches=2 weights=[1.0, 0.0] tok_ms=220.11
+            Dzhokhar Tsarnaev has been convicted of killing three people in the Boston Marathon bombing two years ago. 
+            What is the time period the story covers? From April 2013 to April 2015 What are some interesting details in the article? 
+            Boston Marathon Victims Remembered on 'One Boston Day' . Read the artic
+            """
+
+            first = group[0]
+            outputs.append({
+                "tokens": [result.token_ids],
+                "string": [result.text],
+                "assigned_process": first.get("assigned_process", 0),
+                "assigned_model": self.model_name,
+                "assigned_weights": weights,
+                "assigned_processes": [row.get("assigned_process", i) for i, row in enumerate(group)],
+                "output_index": output_index,
+                "input_index": int(input_index),
+                "elapsed_sec": result.elapsed_sec,
+                "per_token_ms": result.per_token_ms,
+            })
+            # breakpoint()
+            """
+            (Pdb) first.keys()
+            dict_keys(['input_index', 'assigned_model', 'assigned_process', 'context_string', 'assigned_weight', 'gold_answers', 'filter_p', 'article'])
+            (Pdb) outputs
+            [{'tokens': [[450, 12115, 1085, 25206, 13585, 292, 338, 263, 1407, 14610, 322, 25305, 293, 1741, 393, 9559, 297, 12115, 29892, 16167, 373, 3786, 29871, 29896, 29945, 29892, 29871, 29906, 29900, 29896, 29941, 29889, 739, 471, 2309, 491, 1023, 1757, 29892, 323, 4183, 6468, 322, 360, 17599, 554, 8222, 19089, 11441, 5750, 29892, 1058, 892, 515, 6561, 305, 1460, 29874, 29889, 910, 766, 29887, 504, 292, 322, 5192, 2222, 1044, 15201, 17202, 310, 2305, 297, 12115, 322, 278, 18830, 4038, 29889, 2567, 393, 278, 14260, 338, 975, 29892, 372, 338, 701, 304, 278, 11099, 943, 304, 11097, 278, 6035, 18310, 363, 360]], 
+            'string': ['The Boston Marathon bombing is a very sad and tragic event that happened in Boston, Massachusetts on April 15, 2013. It was done by two men, Tamerlan and Dzhokhar Tsarnaev, who were from Chechnya. This disgusting and heartless act affected thousands of people in Boston and the surrounding area. Now that the trial is over, it is up to the jurors to decide the punishment for D'], 'assigned_process': 0, 'assigned_model': 'huggyllama/llama-7b', 'assigned_weights': [1.0, 0.0], 'assigned_processes': [0, 1], 'output_index': 0, 'input_index': 0, 
+            'elapsed_sec': 22.014898031949997, 'per_token_ms': 220.14898031949997}]
+            """
+
+        write_jsonl(outputs, output_path)
+        return output_path
+
+
+def load_factkb(device: str = "cpu", hf_token: Optional[str] = None):
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(
+        "roberta-base",
+        padding="max_length",
+        truncation=True,
+    )
+    kwargs = {"num_labels": 2}
+    if token:
+        kwargs["token"] = token
+    model = AutoModelForSequenceClassification.from_pretrained("bunsenfeng/FactKB", use_safetensors=True, **kwargs)
+    model.to(device)
+    model.eval()
+    return tokenizer, model
+
+
+def factkb_score(
+    factkb_tokenizer,
+    factkb_model,
+    summary: str,
+    article: str,
+    device: str = "cpu",
+) -> float:
+    # breakpoint()
+    tokens = factkb_tokenizer(
+        [[summary, article]],
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+    )
+    tokens = {k: v.to(device) for k, v in tokens.items()}
+    # breakpoint()
+    with torch.no_grad():
+        result = torch.softmax(factkb_model(**tokens).logits, dim=1)
+    return float(result[0][1].item())
+
+
+def evaluate_qa(
+    index2ex: Dict[int, Dict],
+    eval_file: str,
+    use_rouge: bool = True,
+    use_bertscore: bool = True,
+    use_factkb: bool = True,
+    factkb_device: str = "cpu",
+    hf_token: Optional[str] = None,
+) -> Dict:
+    # breakpoint()
+    print(f"Evaluating: {eval_file}")
+    if not os.path.exists(eval_file):
+        raise FileNotFoundError(eval_file)
+
+    # breakpoint()
+    output_data = read_jsonl(eval_file)
+    all_gold: List[str] = []
+    all_pred: List[str] = []
+    all_doc: List[str] = []
+    all_fact_score: List[float] = []
+    id2ex_output = {}
+    # breakpoint()
+    """
+    (Pdb) output_data[0]
+    {'tokens': [[1551, 23168, 1862, 30010, 8373, 445, 1629, 10503, 440, 943, 310, 278, 12115, 1085, 25206, 13585, 292, 2996, 4208, 304, 6456, 278, 12080, 5714, 322, 1906, 1058, 892, 28606, 1023, 2440, 8020, 29889, 3115, 29892, 360, 17599, 554, 8222, 19089, 11441, 5750, 674, 2317, 14260, 2446, 4723, 304, 1074, 565, 540, 20586, 278, 4892, 27368, 363, 278, 29871, 29941, 29900, 21090, 4475, 304, 278, 13585, 886, 29889, 1724, 6297, 1258, 278, 1634, 272, 2153, 1708, 297, 445, 4274, 29973, 2688, 15593, 287, 10503, 440, 943, 310, 278, 13585, 292, 322, 1906, 1058, 8496, 30010, 29873, 14111, 396, 29933, 11253, 12742]], 'string': ['On Patriots’ Day this year survivors of the Boston Marathon bombing came together to remember the lives lost and those who were injured two years ago. Also, Dzhokhar Tsarnaev will stand trial next week to see if he receives the death penalty for the 30 charges related to the bombings. What role did the reporters play in this article? They interviewed survivors of the bombing and those who couldn’t observe #BostonDay'], 'assigned_process': 0, 'assigned_model': 'huggyllama/llama-7b', 'assigned_weights': [1.5, -0.5], 'assigned_processes': [0, 1], 'output_index': 0, 'input_index': 0, 'elapsed_sec': 21.795718614012003, 'per_token_ms': 217.95718614012003}
+    (Pdb) len(output_data)
+    20
+    """
+
+    factkb_tokenizer = None
+    factkb_model = None
+    if use_factkb:
+        factkb_tokenizer, factkb_model = load_factkb(factkb_device, hf_token=hf_token)
+
+    for i, output in enumerate(output_data):
+        index = int(output["input_index"])
+        if index not in index2ex:
+            print(f"[WARN] missing input_index={index} in references")
+            continue
+        pred = output.get("string", [""])[0]
+        if len(pred.strip()) < 3:
+            print(f"[WARN] short prediction for input_index={index}: {pred!r}")
+            continue
+
+        # breakpoint()
+        ex = index2ex[index]
+        gold = ex.get("gold_answers", "")
+        article = ex.get("article", ex.get("context_string", ""))
+
+        # breakpoint()
+        """
+        (Pdb) ex.keys()
+        dict_keys(['input_index', 'assigned_model', 'assigned_process', 'context_string', 'assigned_weight', 'gold_answers', 'filter_p', 'article'])
+        """
+        all_gold.append(gold)
+        all_pred.append(pred)
+        all_doc.append(article)
+        # breakpoint()
+        output_dict = dict(ex)
+        output_dict["pred"] = pred
+        output_dict["output_index"] = output.get("output_index", i)
+        id2ex_output[index] = output_dict
+
+        if use_factkb and factkb_tokenizer is not None and factkb_model is not None:
+            all_fact_score.append(
+                factkb_score(factkb_tokenizer, factkb_model, pred, article, device=factkb_device)
+            )
+
+    # breakpoint()
+    metrics = {
+        "num_predictions": len(all_pred),
+        "factkb": statistics.mean(all_fact_score) if all_fact_score else None,
+        "rouge": None,
+        "bertscore": None,
+    }
+
+    if not all_pred:
+        print("[WARN] no valid predictions to evaluate")
+        return {"metrics": metrics, "examples": id2ex_output}
+
+    if use_factkb and all_fact_score:
+        print(f"fact_score: {metrics['factkb']:.6f}")
+
+    if use_rouge:
+        import evaluate
+
+        rouge = evaluate.load("rouge")
+        metrics["rouge"] = rouge.compute(predictions=all_pred, references=all_gold)
+        print("rouge results:", metrics["rouge"])
+
+    if use_bertscore:
+        import evaluate
+
+        bertscore = evaluate.load("bertscore")
+        result = bertscore.compute(predictions=all_pred, references=all_doc, lang="en")
+        metrics["bertscore"] = {
+            key: statistics.mean(value)
+            for key, value in result.items()
+            if key in {"precision", "recall", "f1"}
+        }
+        print("bertscore:")
+        for key, value in metrics["bertscore"].items():
+            print(f"{key}: {value:.6f}")
+
+    return {"metrics": metrics, "examples": id2ex_output}
+
+
+def default_output_path(data_path: str, projection_top_p: float, max_new_tokens: int) -> str:
+    return f"{data_path}.output_topp{projection_top_p}_genlen{max_new_tokens}.jsonl"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run custom CAD generation/evaluation.")
+    parser.add_argument("--mode", choices=["generate", "evaluate", "generate_and_evaluate"], default="generate")
+    parser.add_argument("--model-name", type=str, default="huggyllama/llama-7b")
+    parser.add_argument("--num-gpus", type=str, default="1")
+    parser.add_argument("--max-gpu-memory", type=int, default=27)
+    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--data-path", type=str, default="./data/cnndm_example_input/cnndm_1_0.jsonl")
+    parser.add_argument("--pred-path", type=str, default=None)
+    parser.add_argument("--output-path", type=str, default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=100)
+    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--top_k", type=int, default=0)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--greedy", action="store_true")
+    parser.add_argument("--projection_top_p", type=float, default=0.9)
+    parser.add_argument("--filter_top_p", type=float, default=1.0)
+    parser.add_argument("--filter_top_p_prior", type=float, default=1.0)
+    parser.add_argument("--print-every", type=int, default=20)
+    parser.add_argument("--eval-assigned-process", type=int, default=0)
+    parser.add_argument("--skip-rouge", action="store_true")
+    parser.add_argument("--skip-bertscore", action="store_true")
+    parser.add_argument("--factkb", action="store_true")
+    parser.add_argument("--factkb-device", choices=["cuda", "cpu"], default="cpu")
+    parser.add_argument("--hf-token", type=str, default=None)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    pred_path = args.pred_path
+
+    if args.mode in {"generate", "generate_and_evaluate"}:
+        output_path = args.output_path or default_output_path(
+            args.data_path,
+            args.projection_top_p,
+            args.max_new_tokens,
+        )
+        cad = CAD(
+            args.model_name,
+            device=args.device,
+            num_gpus=args.num_gpus,
+            max_gpu_memory=args.max_gpu_memory,
+        )
+        pred_path = cad.generate_dataset(
+            data_path=args.data_path,
+            output_path=output_path,
+            max_new_tokens=args.max_new_tokens,
+            projection_top_p=args.projection_top_p,
+            filter_top_p=args.filter_top_p,
+            filter_top_p_prior=args.filter_top_p_prior,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            temperature=args.temperature,
+            do_sample=not args.greedy,
+            limit=args.limit,
+            print_every=args.print_every,
+        )
+
+    if args.mode in {"evaluate", "generate_and_evaluate"}:
+        if pred_path is None:
+            raise ValueError("--pred-path is required for evaluate mode")
+        refs = entity_data(args.data_path, assigned_process=args.eval_assigned_process)
+        payload = evaluate_qa(
+            refs,
+            pred_path,
+            use_rouge=not args.skip_rouge,
+            use_bertscore=not args.skip_bertscore,
+            use_factkb=args.factkb,
+            factkb_device=args.factkb_device,
+            hf_token=args.hf_token,
+        )
+        metric_path = str(Path(pred_path).with_suffix(Path(pred_path).suffix + ".metrics.json"))
+        with open(metric_path, "w", encoding="utf-8") as f:
+            json.dump(payload["metrics"], f, ensure_ascii=False, indent=2, sort_keys=True)
+        print(f"Saved metrics -> {metric_path}")
 
 
 if __name__ == "__main__":
