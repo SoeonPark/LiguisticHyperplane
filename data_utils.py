@@ -98,7 +98,6 @@ def is_correct(pred: str, gold: str) -> bool:
     # f1 = 2 * precision * recall / (precision + recall)
     # return f1 >= 0.5
 
-# ── Case Classifier ───────────────────────────────────────────────────────────
 
 def classify_case(
     correct_w_context: bool,
@@ -119,7 +118,6 @@ def classify_case(
             return 4   # Excluded
 
 
-# ── Inference ─────────────────────────────────────────────────────────────────
 
 def generate_answer(model, tokenizer, prompt: str) -> str:
     """Firstly generate the answer using the model, then extract the answer part from the generated text."""
@@ -183,6 +181,49 @@ def load_hotpotqa(subset: str, split: str, max_samples: Optional[int]) -> list:
     
     return dataset, subset
 
+# DoLa set
+def load_truthfulqa(subset: str, split: str, max_samples: Optional[int]) -> Tuple[list, str]:
+    """
+    Load TruthfulQA dataset (primarily for DoLa evaluation).
+    
+    subset: 'multiple_choice' | 'generation'
+    split:  'validation' (TruthfulQA typically only has validation)
+    """
+    # 기본값이 지정되지 않았다면 multiple_choice를 디폴트로 사용
+    subset = subset if subset in ["multiple_choice", "generation"] else "multiple_choice"
+    
+    print(f"  Loading TruthfulQA [{subset} / {split}]...")
+    dataset = load_dataset("truthful_qa", subset, split=split)
+    
+    if max_samples is not None:
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+    print(f"  -> {len(dataset)} samples")
+    
+    return dataset, subset
+
+# CAD set
+def load_nq_swap(subset: str, split: str, max_samples: Optional[int]) -> Tuple[list, str]:
+    """
+    Load NQ-Swap dataset (primarily for Context-Aware Decoding evaluation).
+    
+    subset: HF repo name (e.g., 'lucasmccabe-lmi/nq-swap') or 'local'
+    split:  'validation' | 'test'
+    """
+    print(f"  Loading NQ-Swap [{subset} / {split}]...")
+    
+    try:
+        if subset == "local":
+            data_files = {split: f"data/nq_swap_{split}.json"}
+            dataset = load_dataset("json", data_files=data_files, split=split)
+        else:
+            repo_name = subset if "/" in subset else "lucasmccabe-lmi/nq-swap" 
+            dataset = load_dataset(repo_name, split=split)
+
+    if max_samples is not None:
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+    print(f"  -> {len(dataset)} samples")
+    
+    return dataset, "nq_swap"
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 
