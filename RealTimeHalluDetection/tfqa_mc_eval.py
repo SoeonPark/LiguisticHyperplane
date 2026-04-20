@@ -265,6 +265,7 @@ if __name__ == "__main__":
         list_data_dict = list_data_dict[args.shard_id * chunk_size: (args.shard_id + 1) * chunk_size]
     
     llm = DoLa(model_name, device, num_gpus, args.max_gpu_memory)
+    breakpoint()
     stop_word_list = ["Q:"]
     llm.set_stop_words(stop_word_list)
     early_exit_layers = [int(x) for x in args.early_exit_layers.split(',')]
